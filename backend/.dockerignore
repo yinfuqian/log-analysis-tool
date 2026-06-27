@@ -1,0 +1,16 @@
+.venv
+.venv-win
+venv
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+*.log
+app/logs
+build
+dist
+tests/__pycache__
+.pytest_cache
+.mypy_cache
+.DS_Store
+openssl-*.tar.gz

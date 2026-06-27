@@ -1,0 +1,109 @@
+/* product-manage.css */
+
+/* 基础样式 */
+.product-manage {
+  padding: 20px;
+}
+
+/* 创建产品按钮 */
+.add-product-btn {
+  margin-bottom: 20px;
+}
+
+/* 产品表格样式 */
+.product-table {
+  margin-top: 20px;
+  width: 100%;
+}
+
+/* 操作按钮容器 */
+.action-buttons {
+  display: flex;
+  gap: 10px; /* 控制按钮间距 */
+  justify-content: flex-start; /* 可根据需要调整按钮对齐方式 */
+}
+
+/* 删除按钮样式 */
+.delete-btn {
+  background-color: #f56c6c;
+  color: white;
+  font-size: 12px;
+  border-radius: 4px;
+  transition: background-color 0.3s;
+  border: none;
+  padding: 5px 10px;
+}
+
+.delete-btn:hover {
+  background-color: #f2a9a9;
+}
+
+/* 编辑按钮样式 */
+.edit-btn {
+  background-color: #409eff;
+  color: white;
+  font-size: 12px;
+  border-radius: 4px;
+  transition: background-color 0.3s;
+  border: none;
+  padding: 5px 10px;
+}
+
+.edit-btn:hover {
+  background-color: #66b1ff;
+}
+
+/* 产品表格列标题 */
+.el-table .cell {
+  font-weight: bold;
+  color: #333;
+}
+
+/* 弹窗的样式 */
+.el-dialog {
+  max-width: 600px;
+}
+
+/* 弹窗标题 */
+.el-dialog__header {
+  background-color: #f4f4f4;
+  font-weight: bold;
+  color: #333;
+  padding: 15px;
+}
+
+/* 弹窗内容 */
+.el-dialog__body {
+  padding: 20px;
+  background-color: #fafafa;
+}
+
+/* 弹窗按钮 */
+.el-dialog__footer {
+  padding: 15px;
+  text-align: right;
+  background-color: #f9f9f9;
+}
+
+.el-dialog__footer .el-button {
+  padding: 8px 20px;
+}
+
+/* 自定义的字体大小和字体颜色 */
+.product-manage .el-button {
+  font-size: 14px;
+  color: #333;
+}
+
+/* 控制产品表格单元格的内容 */
+.el-table-column {
+  text-align: left;
+  font-size: 13px;
+}
+
+/* 清理浮动等 */
+.clearfix::after {
+  content: "";
+  display: table;
+  clear: both;
+}

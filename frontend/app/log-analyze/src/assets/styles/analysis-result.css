@@ -1,0 +1,20 @@
+.analysis-result {
+    padding: 20px;
+  }
+  
+  .result {
+    margin-top: 20px;
+    color: green;
+  }
+  
+  .file-path {
+    font-weight: bold;
+    margin-top: 10px;
+  }
+  
+  pre {
+    background: #f6f8fa;
+    padding: 10px;
+    border-radius: 6px;
+    overflow-x: auto;
+  }

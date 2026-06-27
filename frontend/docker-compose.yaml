@@ -1,0 +1,15 @@
+version: '3'
+services:
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: frontend:latest
+    volumes:
+      - ./app:/app  # 将宿主机的 app 目录挂载到容器内的 /app 目录
+    ports:
+      - "8080:8080"  # 暴露容器的 8080 端口
+      - "8081:8081"  # 暴露容器的 8081 端口
+    environment:
+      - NODE_ENV=development  # 设置 Node 环境变量
+    command: ["/bin/bash", "-c", "/entrypoint.sh"]  # 执行 entrypoint.sh 脚本

@@ -1,0 +1,66 @@
+version: '2'
+services:
+  api:
+    image: ${BACKEND_IMAGE}
+    network_mode: "host"
+    env_file:
+      - .env
+    environment:
+      FLASK_APP: app.py
+      PYTHONUNBUFFERED: "1"
+    command:
+      - gunicorn
+      - -w
+      - ${WEB_CONCURRENCY}
+      - -k
+      - gevent
+      - --bind
+      - 0.0.0.0:5000
+      - app:create_app()
+    ports:
+      - "${API_PORT}:5000"
+    volumes:
+      - ./data/upload:/data/upload
+      - ./data/logs:/app/app/logs
+      - ./data/repos:/tmp/log-analyzer-repos
+    restart: unless-stopped
+
+  worker:
+    image: ${BACKEND_IMAGE}
+    network_mode: "host"
+    env_file:
+      - .env
+    environment:
+      PYTHONUNBUFFERED: "1"
+    command:
+      - celery
+      - -A
+      - celery_worker.celery_app
+      - worker
+      - --loglevel=INFO
+      - --concurrency=${CELERY_WORKER_CONCURRENCY}
+    volumes:
+      - ./data/upload:/data/upload
+      - ./data/logs:/app/app/logs
+      - ./data/repos:/tmp/log-analyzer-repos
+    restart: unless-stopped
+    depends_on:
+      - api
+
+  migrate:
+    image: ${BACKEND_IMAGE}
+    network_mode: "host"
+    env_file:
+      - .env
+    environment:
+      FLASK_APP: app.py
+      PYTHONUNBUFFERED: "1"
+    command:
+      - sh
+      - -c
+      - python init_database.py && (flask db upgrade || python bootstrap_schema.py)
+    volumes:
+      - ./data/upload:/data/upload
+      - ./data/logs:/app/app/logs
+      - ./data/repos:/tmp/log-analyzer-repos
+    restart: unless-stopped
