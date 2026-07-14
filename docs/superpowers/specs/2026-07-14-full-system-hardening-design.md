@@ -1,225 +1,225 @@
-# Full-System Hardening And Maintainability Design
+# 日志分析系统整体加固与可维护性设计
 
-## Goal
+## 目标
 
-Harden the log analyzer for authenticated use, remove unsafe trust in client-supplied paths and repository URLs, improve database integrity and transaction safety, reduce backend and frontend coupling, and make builds and verification reproducible without discarding the current OCR, multilingual analysis, knowledge-base, or Windows-client behavior.
+为日志分析系统增加强制登录和完整的安全边界，消除对客户端文件路径与 Git 地址的无条件信任，提高数据库完整性和事务安全，降低前后端代码耦合，并建立可重复的构建、迁移和验证流程。
 
-The work will be delivered in independently verifiable phases. Existing public business URLs remain compatible during the migration unless a security boundary requires stricter validation.
+改造不能破坏现有的 OCR、多语言日志分析、知识库、上下游模块分析和 Windows 客户端能力。全部工作采用分阶段交付，每个阶段都必须可以独立验证。除安全要求必须收紧的部分外，现有业务接口地址在迁移期间保持兼容。
 
-## Scope And Delivery Order
+## 实施范围与顺序
 
-1. Establish a reproducible test and migration baseline.
-2. Add file-backed user authentication and mandatory authorization.
-3. Harden uploads, analysis file references, Git access, CORS, and Markdown rendering.
-4. Add database constraints, transaction boundaries, and efficient queries.
-5. Extract backend services while retaining current API URLs.
-6. Add web and Windows-client login flows and split oversized client modules.
-7. Make Docker builds reproducible, add CI, and update operational documentation.
+1. 建立可重复执行的测试、依赖和数据库迁移基线。
+2. 增加基于用户配置文件的登录鉴权，并默认保护所有业务接口。
+3. 加固上传、文件引用、Git 访问、CORS 和 Markdown 渲染。
+4. 增加数据库约束，统一事务边界并优化查询性能。
+5. 在保持现有接口地址的前提下拆分后端服务。
+6. 增加网页端和 Windows 客户端登录流程，并逐步拆分过大的客户端文件。
+7. 改造 Docker 构建、持续集成和运维文档。
 
-## Authentication And User Configuration
+## 登录鉴权与用户配置
 
-### User File
+### 用户配置文件
 
-Users are managed through a JSON file whose path is configured by environment variable. There is no self-registration flow, administrator role, or user-management UI. Every configured user has the same application permissions.
+用户通过独立 JSON 文件管理，文件路径由环境变量指定。不提供用户自助注册、管理员角色或用户管理页面，所有已配置用户拥有相同的应用使用权限。
 
-Each entry contains:
+每个用户配置包含：
 
-- a normalized unique username;
-- a strong password hash rather than a plaintext password;
-- an enabled flag;
-- a credential version that changes whenever the password or account state changes.
+- 规范化且唯一的用户名；
+- 安全密码哈希，不保存明文密码；
+- 是否启用；
+- 凭证版本，在修改密码或账号状态时变更。
 
-The repository includes a password-hash generation command. It reads the password interactively so the password does not need to be committed or passed as a command-line argument.
+项目提供密码哈希生成命令。密码通过交互方式输入，避免将明文密码提交到仓库或长时间保留在命令历史中。
 
-### Hot Reload
+### 配置热加载
 
-The backend caches the last valid user configuration and checks the file modification identity during authentication. A changed file is parsed and validated into a new immutable snapshot, then atomically replaces the previous snapshot.
+后端缓存最后一份有效的用户配置，并在鉴权时检查文件是否发生变化。发现变化后，先完整解析和验证新文件，再通过原子替换更新当前配置快照。
 
-If the changed file is missing, malformed, duplicated, or contains invalid password hashes, the backend keeps the last valid snapshot and logs a structured configuration error. A service that has never loaded a valid user file fails closed and exposes only the health endpoint.
+如果新文件缺失、JSON 格式错误、用户名重复或密码哈希无效，后端继续使用上一份有效配置，并记录结构化错误日志。如果服务启动后从未成功读取过有效配置，则鉴权功能保持关闭状态，所有业务接口拒绝访问，只开放健康检查。
 
-### Session Model
+### 会话模型
 
-`POST /auth/login` validates credentials and creates a cryptographically random opaque session token. Session state is stored in Redis and contains the username, credential version, creation time, and last-seen metadata. The raw token is returned only once; Redis stores a hash of it.
+`POST /auth/login` 验证用户名和密码，成功后生成加密安全的随机会话令牌。会话状态保存在 Redis 中，包括用户名、凭证版本、创建时间和最近访问元数据。原始令牌只返回一次，Redis 只保存令牌哈希。
 
-`POST /auth/logout` removes the current session. `GET /auth/me` returns the authenticated username and current session state.
+`POST /auth/logout` 删除当前会话，`GET /auth/me` 返回当前用户和会话状态。
 
-Every protected request verifies:
+每个受保护请求都必须验证：
 
-1. the token exists in Redis;
-2. the user still exists and is enabled in the current file snapshot;
-3. the session credential version matches the current user entry.
+1. 会话令牌在 Redis 中存在；
+2. 用户仍存在于当前用户配置中且处于启用状态；
+3. 会话中的凭证版本与用户当前凭证版本一致。
 
-Deleting or disabling a user, or changing that user's password or credential version, therefore invalidates all existing sessions immediately. All business endpoints are protected by default; only login and health checks are anonymous.
+因此，删除用户、禁用用户、修改密码或修改凭证版本后，该用户所有已有会话立即失效。除登录和健康检查外，所有业务接口默认要求登录。
 
-The web client stores the token in `sessionStorage`, so closing the browser tab or window removes local login state. The Windows client stores it only in process memory. Neither client implements remember-password behavior. A 401 response clears local session state and returns the user to the login screen.
+网页端将令牌保存在 `sessionStorage` 中，关闭浏览器标签页或窗口后本地登录状态消失。Windows 客户端只在进程内存中保存令牌。两端都不提供“记住密码”。收到 401 响应后，客户端必须立即清除本地会话并返回登录界面。
 
-### Login Abuse Controls
+### 登录防护
 
-Login failures are rate-limited by normalized username and source address using Redis. Responses do not reveal whether a username exists. Successful authentication resets the relevant failure counter. Authentication events are logged without passwords or tokens.
+登录失败按规范化用户名和来源地址进行 Redis 限流。错误响应不透露用户名是否存在。登录成功后清除对应失败计数。鉴权日志不得记录密码、密码哈希或完整会话令牌。
 
-## File And Upload Security
+## 文件与上传安全
 
-### Limits
+### 上传限制
 
-- One log upload is limited to 100 MB.
-- One image is limited to 10 MB.
-- One request accepts at most 10 images.
-- Total request size is enforced before application processing where possible.
+- 单个日志文件最大 100 MB。
+- 单张图片最大 10 MB。
+- 单次请求最多上传 10 张图片。
+- 尽可能在进入业务处理前限制整个请求体大小。
 
-Logs are processed as bounded streams or temporary files instead of being copied into memory without a limit. Images are checked by extension, MIME signature, actual decoder format, dimensions, and decompression-bomb safeguards. A failed multi-file upload removes all files created by that request.
+日志采用有界流或临时文件处理，不再无上限地一次性读入内存。图片同时校验扩展名、MIME 特征、实际解码格式、像素尺寸和解压炸弹风险。多文件上传过程中任何文件失败，都要清理本次请求已经生成的全部临时文件。
 
-### Server-Side File References
+### 服务端文件引用
 
-Analysis APIs stop treating client-supplied absolute `file_path` and `repo_path` values as trusted references. New requests use `log_id` or an opaque upload token. The backend resolves the stored path and verifies its real path is beneath the configured upload root.
+分析接口不再信任客户端提交的绝对 `file_path` 和 `repo_path`。新请求使用 `log_id` 或不可猜测的上传令牌，后端从数据库解析实际路径，并确认解析后的真实路径位于配置的上传根目录中。
 
-During a compatibility period, old path fields are accepted only when their resolved path is beneath an approved root and corresponds to the expected stored record. Accepted legacy requests emit a deprecation log. Arbitrary existing server files are never readable through the API.
+兼容期内可以保留旧路径字段，但只接受位于允许目录中且与预期数据库记录匹配的路径，同时记录弃用日志。任何已有的服务器任意文件都不能通过分析接口读取。
 
-Temporary upload and repository cleanup uses real-path containment checks and task-scoped directories. Cleanup failures are logged and can be retried without deleting paths outside the configured roots.
+临时上传文件和 Git 工作区清理统一使用真实路径包含校验和任务独立目录。清理失败可以安全重试，并保证不会删除配置根目录以外的文件。
 
-## Git Security And Workspace Management
+## Git 安全与工作区管理
 
-The configured Git service is the only allowed repository authority. Repository URLs must:
+配置文件声明的 Git 服务是系统唯一允许访问的仓库来源。仓库地址必须满足：
 
-- use HTTPS;
-- match the configured Git base host and allowed path prefix;
-- reject embedded credentials, alternate schemes, localhost, raw IP targets, and unconfigured hosts;
-- remain within the configured authority after normalization and redirects.
+- 只允许 HTTPS；
+- 域名和允许的路径前缀必须匹配 Git 基础地址；
+- 拒绝 URL 内嵌凭证、其他协议、本机地址、裸 IP 地址和未配置域名；
+- 地址规范化和跳转后仍然属于允许的 Git 服务范围。
 
-Git credentials are not embedded in command-line URLs. The Git adapter supplies credentials through a temporary, process-scoped credential mechanism that is removed after use and never included in logs or API errors.
+Git 凭证不能再拼接进命令行 URL。Git 适配器通过临时且仅当前进程可见的凭证机制提供认证，用完立即清理，并确保凭证不会进入日志或 API 错误响应。
 
-Clone, branch lookup, and permission checks have explicit timeouts, bounded output capture, shallow-clone behavior where compatible, task-scoped workspace names, and disk-usage limits. Failed or cancelled operations clean up their workspace. Repository error responses are normalized and sanitized.
+仓库克隆、分支查询和权限检查都增加明确超时、有限的输出捕获、适用时的浅克隆、任务独立工作区和磁盘空间限制。失败或取消后清理工作区。仓库错误统一转换为经过脱敏的业务错误。
 
-## Web Security
+## 网页安全
 
-Markdown rendering disables raw HTML and passes generated output through DOMPurify with a narrow element, attribute, and URL-protocol allowlist. External links receive safe `rel` attributes.
+Markdown 渲染关闭原始 HTML，并使用 DOMPurify 按严格的元素、属性和 URL 协议白名单进行二次清洗。外部链接自动增加安全的 `rel` 属性。
 
-CORS uses a configured origin allowlist and does not allow wildcard credentialed access. The backend adds appropriate content-type, frame, referrer, and content-security response headers. Mutating requests require the bearer session and use JSON or multipart content types expected by the endpoint.
+CORS 使用配置的来源白名单，不允许带凭证的通配符跨域。后端增加内容类型、页面嵌入、来源策略和内容安全策略等响应头。所有修改数据的请求都必须携带有效会话令牌，并使用接口要求的 JSON 或 multipart 类型。
 
-## Database Integrity And Transactions
+## 数据库完整性与事务
 
-### Schema
+### 数据库结构
 
-New Alembic migrations add:
+新增 Alembic 迁移，完成以下调整：
 
-- foreign keys for `product_modules` and `module_branches`;
-- unique constraints for `(product_id, module_id)` and `(module_id, branch_id)`;
-- a unique or explicitly versioned constraint for repository address and tag combinations;
-- indexes supporting product-module lookup, module-branch lookup, task history, and knowledge-case lookup;
-- corrected foreign keys for query records on every supported upgrade path.
+- 为 `product_modules` 和 `module_branches` 增加外键；
+- 为 `(product_id, module_id)` 和 `(module_id, branch_id)` 增加组合唯一约束；
+- 为仓库地址和版本组合增加明确的唯一或版本化约束；
+- 为产品模块查询、模块分支查询、任务历史和知识库查询增加索引；
+- 确保所有支持的升级路径都会修正查询记录表的错误外键。
 
-Before adding constraints, the migration deterministically removes duplicate relationship rows and reports or removes orphan rows according to the documented policy. Migration tests cover both an empty database and a representative legacy schema.
+添加约束前，迁移脚本必须按照确定性规则清理重复关系，并根据文档策略报告或删除孤儿数据。迁移测试同时覆盖空数据库和具有代表性的旧版本数据库结构。
 
-### Deletion Policy
+### 删除策略
 
-Deleting a product or module removes configuration relationships but preserves analysis history. Historical records retain stable identifying fields even if the live configuration is later removed. Repository and branch records are deleted only when no configuration references remain.
+删除产品或模块时删除对应配置关系，但保留历史分析记录。历史记录保留稳定的产品和模块标识信息，不会因为实时配置被删除而丢失。仓库或分支记录仅在没有任何配置引用时才允许删除。
 
-### Transactions And Queries
+### 事务与查询
 
-Product, module, branch, and relationship mutations execute in one transaction. Validation occurs before writes; failures roll back the complete operation. Integrity errors produce a consistent conflict response rather than partial data.
+产品、模块、分支及其关系的新增和更新必须在一个事务中完成。所有输入校验在写入前执行，任何一步失败都整体回滚。数据库完整性冲突返回统一的冲突错误，不能留下半成品数据。
 
-List and search endpoints use joins or eager loading rather than querying modules and branches inside loops. Pagination and bounded result sizes are added where lists can grow.
+列表和搜索接口改用 JOIN 或预加载，不再在循环中逐条查询模块和分支。可能持续增长的列表增加分页和最大结果数量限制。
 
-## Backend Architecture
+## 后端结构
 
-The current URLs remain stable while route modules become thin adapters over focused services:
+在保持现有 URL 不变的前提下，将路由逐步收敛为薄适配层，业务逻辑拆分为：
 
-- `auth`: user-file loading, password verification, sessions, and rate limiting;
-- `uploads`: upload validation, storage, and opaque file references;
-- `repositories`: URL policy, credentials, Git commands, and workspaces;
-- `analysis`: task orchestration and domain-level analysis flow;
-- `ai`: provider configuration, prompts, requests, and normalized failures;
-- `knowledge`: fingerprints, cache lookup, and knowledge-case persistence;
-- `products` and `modules`: configuration queries and transactional mutations.
+- `auth`：用户文件加载、密码校验、会话和登录限流；
+- `uploads`：上传校验、存储和不可猜测的文件引用；
+- `repositories`：Git 地址策略、凭证、命令和工作区；
+- `analysis`：任务编排和领域分析流程；
+- `ai`：模型配置、提示词、请求和统一异常；
+- `knowledge`：错误指纹、缓存查询和知识库持久化；
+- `products` 与 `modules`：业务配置查询和事务修改。
 
-Services expose explicit inputs and results and do not depend on Flask request globals. Celery tasks call the same services as synchronous routes. Route errors use a shared JSON shape containing a stable error code, a safe message, optional field details, and a request identifier.
+服务层使用明确的输入和返回值，不依赖 Flask 请求全局对象。Celery 任务与同步接口调用相同的服务。所有路由错误统一返回稳定错误码、安全错误信息、可选字段详情和请求标识。
 
-The existing large analysis route and Windows-client module are reduced incrementally. Refactoring is performed alongside characterization tests so OCR, multilingual extraction, related-module discovery, knowledge hits, progress reporting, and cleanup semantics remain intact.
+现有大型分析路由和 Windows 客户端主文件采用增量方式拆分。重构前补充特征测试，确保 OCR、多语言错误提取、上下游模块识别、知识库命中、进度上报和临时文件清理行为保持不变。
 
-## Web Client
+## 网页客户端
 
-The web application gains a login page and global route guard. Business routes are not mounted as usable views until the current session has been validated.
+网页增加独立登录页和全局路由守卫。当前会话校验成功前，业务页面不可使用。
 
-All API modules share one Axios client that owns:
+所有 API 模块共用一个 Axios 客户端，统一负责：
 
-- the configured base URL;
-- bearer-token injection;
-- request timeout defaults;
-- normalized error handling;
-- 401 session cleanup and login redirection.
+- 服务基础地址；
+- 自动添加会话令牌；
+- 默认请求超时；
+- 统一错误处理；
+- 收到 401 后清除会话并跳转登录页。
 
-Duplicate API wrappers are consolidated. Element Plus remains the UI system. Unused `marked` and `vuetify` dependencies are removed. Frontend tests cover login, protected navigation, 401 handling, Markdown sanitization, upload limits, and the primary analysis flow.
+合并重复 API 封装。保留 Element Plus，删除未使用的 `marked` 和 `vuetify`。前端测试覆盖登录、受保护路由、401 处理、Markdown 清洗、上传限制和主要分析流程。
 
-## Windows Client
+## Windows 客户端
 
-The Windows application opens a login window before creating the main business window. A successful login creates an in-memory authenticated API session. Logout, application exit, a 401 response, or a credential-version mismatch destroys that session and returns to login.
+Windows 应用启动后先显示登录窗口，登录成功后才创建主业务窗口。成功登录会创建只存在于内存中的已认证 API 会话。主动退出、关闭应用、收到 401 或凭证版本失效后，销毁会话并返回登录窗口。
 
-The current client module is split incrementally into:
+现有客户端主文件逐步拆分为：
 
-- authenticated API client;
-- login window;
-- main window and shared state;
-- upload and chain-evidence workflow;
-- task progress handling;
-- analysis-result window and rendering helpers.
+- 已认证 API 客户端；
+- 登录窗口；
+- 主窗口和共享状态；
+- 上传及上下游证据流程；
+- 任务进度处理；
+- 分析结果窗口和渲染辅助模块。
 
-The visible workflow and current analysis features remain compatible. Tests cover successful and failed login, token propagation, forced logout, application restart, and existing upload and analysis behavior.
+保持现有界面和分析操作方式。测试覆盖登录成功与失败、令牌传递、强制退出、应用重启，以及已有上传和分析功能。
 
-## Deployment And Operations
+## 部署与运维
 
-The frontend uses a fixed supported Node LTS image, `npm ci`, and a multi-stage production build. Runtime containers do not install dependencies on startup.
+前端使用固定且受支持的 Node LTS 镜像，通过 `npm ci` 和多阶段构建生成生产产物，运行容器启动时不再安装依赖。
 
-The backend uses a fixed supported Python version and pinned dependency sets. Runtime containers use a non-root user and writable directories only for uploads, logs, model caches, and Git workspaces. API, worker, migration, Redis, and database readiness are represented with explicit health checks or documented external-service requirements.
+后端使用固定且受支持的 Python 版本和锁定的依赖集合。运行容器使用非 root 用户，仅允许上传目录、日志目录、模型缓存和 Git 工作区写入。API、Worker、数据库迁移、Redis 和数据库提供明确健康检查，或在使用外部服务时提供清晰的启动条件说明。
 
-Logging uses structured or consistently formatted output with request and task identifiers. File logging, when enabled, rotates by size or time. Sensitive values, session tokens, password hashes, repository credentials, and raw authorization headers are filtered.
+日志使用结构化格式或一致格式，并包含请求标识和任务标识。启用文件日志时按大小或时间轮转。敏感值、会话令牌、密码哈希、Git 凭证和完整 Authorization Header 必须过滤。
 
-The README and deployment documentation describe user-file creation, password-hash generation, hot reload, session invalidation, upload limits, Git authority configuration, database migration, rollback boundaries, and troubleshooting.
+README 和部署文档补充用户文件创建、密码哈希生成、热加载、会话立即失效、上传限制、Git 服务范围、数据库升级、回滚边界和故障排查说明。
 
-## Continuous Integration
+## 持续集成
 
-CI runs on every change and includes:
+每次改动执行以下检查：
 
-- backend unit and integration tests;
-- Windows-client tests on a compatible Python version;
-- frontend lint, unit tests, and production build;
-- Python compilation and configured style checks;
-- Alembic upgrade from an empty database and a legacy-schema fixture;
-- Docker Compose configuration validation;
-- secret scanning and high-severity dependency scanning.
+- 后端单元测试和集成测试；
+- 使用兼容 Python 版本执行 Windows 客户端测试；
+- 前端 lint、单元测试和生产构建；
+- Python 编译与配置的代码规范检查；
+- Alembic 从空数据库升级以及旧结构升级测试；
+- Docker Compose 配置校验；
+- 密钥扫描和高危依赖漏洞扫描。
 
-The project defines supported Python and Node versions so local and CI environments do not silently use incompatible runtimes. OCR-heavy tests inject adapters where model downloads are not required; a separate optional integration job can exercise the real OCR runtime.
+项目明确声明支持的 Python 和 Node 版本，避免本地和 CI 使用不兼容运行时。普通 OCR 测试使用可注入适配器，不要求下载模型；另设可选集成任务验证真实 OCR 运行环境。
 
-## Error Handling And Compatibility
+## 错误处理与兼容策略
 
-- Invalid user-file reload: keep the last valid snapshot and report an operational error.
-- Redis unavailable: fail protected authentication closed and return a service-unavailable response.
-- Invalid or oversized upload: reject before analysis and remove request-created artifacts.
-- Invalid file reference: return a non-disclosing validation error.
-- Disallowed or timed-out Git operation: return a sanitized repository error and clean the workspace.
-- AI provider failure: preserve the current normalized service-error behavior and task progress state.
-- Database integrity conflict: roll back and return a stable conflict code.
-- Expired or invalidated session: return 401; both clients clear state and show login.
+- 用户文件热加载失败：保留上一份有效配置并记录运维错误。
+- Redis 不可用：鉴权失败关闭，受保护接口返回服务不可用。
+- 上传文件无效或超限：进入分析前拒绝，并清理本次请求生成的文件。
+- 文件引用无效：返回不泄露服务器路径的参数错误。
+- Git 地址不允许或命令超时：返回脱敏仓库错误并清理工作区。
+- AI 服务失败：保留现有统一错误和任务进度状态。
+- 数据库完整性冲突：整体回滚并返回稳定冲突错误码。
+- 会话不存在或已失效：返回 401，网页端和 Windows 客户端清除状态并显示登录页。
 
-Compatibility adapters are temporary, observable, and covered by tests. Their removal criteria and target release are documented rather than left indefinitely.
+所有兼容适配器都必须可以通过日志观测，并由测试覆盖。文档明确记录其移除条件和目标版本，避免长期保留临时代码。
 
-## Testing Strategy
+## 测试策略
 
-Each delivery phase begins with characterization or failing security tests and ends with the relevant complete suites. Required coverage includes:
+每个实施阶段先增加特征测试或预期失败的安全测试，完成后运行对应完整测试集合。必须覆盖：
 
-- user-file parsing, atomic hot reload, invalid-file fallback, password verification, and immediate session invalidation;
-- login rate limiting and non-enumerating errors;
-- authorization on every blueprint and Celery task status/cancellation endpoint;
-- arbitrary path rejection and approved-root containment on Windows and Linux path forms;
-- upload count, byte, MIME, decoder, and decompression limits;
-- Git authority normalization, credential redaction, timeout, cancellation, and cleanup;
-- Markdown XSS payloads and safe-link behavior;
-- relationship deduplication, foreign keys, transactions, deletion policy, and N+1 query regression;
-- web and Windows login flows and 401 behavior;
-- clean Docker builds and database upgrades.
+- 用户文件解析、原子热加载、错误文件回退、密码验证和会话立即失效；
+- 登录限流和不会泄露用户名是否存在的错误响应；
+- 所有 Blueprint、Celery 状态和任务取消接口的鉴权；
+- 任意路径拒绝，以及 Windows/Linux 路径形式下的允许目录校验；
+- 上传数量、字节大小、MIME、解码格式和图片解压限制；
+- Git 地址规范化、凭证脱敏、超时、取消和工作区清理；
+- Markdown XSS 攻击样本和安全链接行为；
+- 关系去重、外键、事务、删除策略和 N+1 查询回归；
+- 网页端和 Windows 客户端登录及 401 行为；
+- 全新 Docker 构建和数据库升级。
 
-## Out Of Scope
+## 不在本次范围内
 
-- Self-registration, password recovery email, administrator roles, or a user-management UI.
-- Multiple Git service authorities unless explicitly added to the configuration format later.
-- Replacing Redis, Celery, Flask, Vue, or the Windows UI toolkit.
-- Redesigning the existing user-facing analysis workflow or visual style.
-- Persisting login state after the browser tab or Windows application closes.
+- 用户自助注册、邮件找回密码、管理员角色或用户管理页面。
+- 同时支持多个 Git 服务域名，除非未来明确扩展配置格式。
+- 替换 Redis、Celery、Flask、Vue 或 Windows UI 技术栈。
+- 重新设计现有分析业务流程或整体视觉风格。
+- 浏览器标签页或 Windows 应用关闭后继续保持登录状态。
