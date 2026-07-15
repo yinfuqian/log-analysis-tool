@@ -1,3 +1,13 @@
+## 开发环境
+
+- Python：3.11（当前基线使用 3.11.15）
+- Node.js：20 LTS（当前基线使用 20.19.4）
+- 后端开发依赖：`python -m pip install -r backend/requirements-dev.txt`
+- Windows 客户端测试：`python -m unittest discover -s windows-client/tests`
+- 后端测试：在 `backend` 目录执行 `python -m unittest discover -s tests`
+
+请不要使用 Python 3.14 或 Node.js 24 作为发布构建环境；当前依赖和 Docker 构建以以上固定版本为准。
+
 ## 效果
 ![alt text](image-1.png)
 ![alt text](image.png)
