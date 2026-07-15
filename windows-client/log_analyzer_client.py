@@ -33,6 +33,9 @@ except ImportError:  # pragma: no cover - keeps source runnable before first bui
     APP_VERSION = "v1.0.0"
     APP_RELEASE_DATE = "2026-06-24"
 
+from api_client import ApiClient
+from login_window import LoginWindow
+
 APP_RELEASE_LABEL = f"\u65e5\u5fd7\u5206\u6790\u5ba2\u6237\u7aef/{APP_VERSION} fix on {APP_RELEASE_DATE}"
 DEFAULT_BACKEND_URL = "http://qwbot30.wezhuiyi.com:9595/zhuiyi/logapi"
 DRAG_DROP_ENABLED = windnd is not None
@@ -840,10 +843,7 @@ class AnalysisResultWindow:
         self.window.clipboard_append(text)
 
 
-class LogAnalyzerApiClient:
-    def __init__(self, base_url, session=None):
-        self.base_url = base_url.rstrip("/")
-        self.session = session or requests.Session()
+class LogAnalyzerApiClient(ApiClient):
 
     def get_products(self):
         response = self.session.get(f"{self.base_url}/product/get")
@@ -1062,8 +1062,9 @@ def poll_task_until_ready(
 
 
 class LogAnalyzerWindow:
-    def __init__(self, root):
+    def __init__(self, root, api_client=None):
         self.root = root
+        self.api_client = api_client
         self.root.title(APP_RELEASE_LABEL)
         self.root.geometry("1020x780")
         self.root.deiconify()
@@ -1087,7 +1088,7 @@ class LogAnalyzerWindow:
         self._pasted_image_path = None
         self.image_paths = []
 
-        self.backend_url = tk.StringVar(value=DEFAULT_BACKEND_URL)
+        self.backend_url = tk.StringVar(value=api_client.base_url if api_client else DEFAULT_BACKEND_URL)
         self.product_selection = tk.StringVar()
         self.module_selection = tk.StringVar()
         self.product_id = tk.StringVar()
@@ -1596,6 +1597,9 @@ class LogAnalyzerWindow:
         return poll_task_until_ready(client, task_id, on_status=self._set_status, on_progress=self._handle_task_progress, should_cancel=lambda: self.cancel_requested)
 
     def _client(self):
+        if self.api_client is not None:
+            self.api_client.set_base_url(self.backend_url.get())
+            return self.api_client
         return LogAnalyzerApiClient(self.backend_url.get())
 
     def _validate_common_fields(self, require_file):
@@ -1745,7 +1749,13 @@ class LogAnalyzerWindow:
 
     def _on_close(self):
         self._stop_progress_animation()
-        self.root.destroy()
+        try:
+            if self.api_client is not None:
+                self.api_client.logout()
+        except requests.RequestException:
+            pass
+        finally:
+            self.root.destroy()
 
     def _write_analysis_summary(self, payload):
         summary = build_analysis_summary(payload)
@@ -1759,9 +1769,42 @@ class LogAnalyzerWindow:
         self.root.after(0, lambda: (self.result_text.insert(tk.END, formatted), self.result_text.see(tk.END)))
 
 
+class ClientApplication:
+    def __init__(self, root):
+        self.root = root
+        self.main_window = None
+        self.login_window = None
+        self.client = LogAnalyzerApiClient(
+            DEFAULT_BACKEND_URL,
+            on_unauthorized=self._handle_unauthorized,
+        )
+        self.show_login()
+
+    def show_login(self):
+        if self.login_window is not None and self.login_window.exists():
+            return
+        self.root.withdraw()
+        self.login_window = LoginWindow(
+            self.root,
+            self.client,
+            on_success=self._login_succeeded,
+            on_cancel=self.root.destroy,
+        )
+
+    def _login_succeeded(self, _username):
+        self.login_window = None
+        if self.main_window is None:
+            self.main_window = LogAnalyzerWindow(self.root, api_client=self.client)
+        else:
+            self.root.deiconify()
+
+    def _handle_unauthorized(self):
+        self.root.after(0, self.show_login)
+
+
 def main():
     root = tk.Tk()
-    LogAnalyzerWindow(root)
+    ClientApplication(root)
     root.mainloop()
 
 
