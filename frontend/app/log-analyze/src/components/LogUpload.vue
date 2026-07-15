@@ -31,7 +31,7 @@
 
       <!-- 上传日志 -->
       <el-form-item label="上传日志">
-        <el-upload :action="uploadUrl" :file-list="fileList" :on-success="onUploadSuccess" :before-upload="beforeUpload"
+        <el-upload :action="uploadUrl" :headers="uploadHeaders" :file-list="fileList" :on-success="onUploadSuccess" :before-upload="beforeUpload"
           :data="uploadParams" :show-file-list="true" :on-error="onUploadError">
           <el-button type="primary">点击上传</el-button>
         </el-upload>

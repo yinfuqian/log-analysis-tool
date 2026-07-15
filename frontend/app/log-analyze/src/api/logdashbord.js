@@ -1,11 +1,9 @@
-import axios from 'axios';
-
-const VUE_APP_BASE_URL = process.env.VUE_APP_BASE_URL || "http://localhost:5000";
+import apiClient from './client';
 
 const logdashbordApi = {
   async getDashboardData() {
     try {
-      const response = await axios.get(`${VUE_APP_BASE_URL}/dashboard/get`);
+      const response = await apiClient.get('/dashboard/get');
       return response.data; 
     } catch (error) {
       console.error("API 请求失败:", error);

@@ -1,6 +1,7 @@
 const path = require('path');  // 确保引入 path 模块
 
 const { defineConfig } = require('@vue/cli-service');
+const { createChunkName } = require('./build/chunkName');
 
 module.exports = defineConfig({
   transpileDependencies: true,
@@ -54,10 +55,7 @@ module.exports = defineConfig({
       maxInitialRequests: 5,
       maxAsyncRequests: 6,
       automaticNameDelimiter: '-',
-      name: (module) => {
-        const moduleName = module.context.split('/').pop();
-        return `chunk-${moduleName}`;
-      }
+      name: (module) => createChunkName(module.context)
     });
   }
 });

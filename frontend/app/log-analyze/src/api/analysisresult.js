@@ -1,9 +1,6 @@
-import axios from 'axios';
+import apiClient from './client';
 import MarkdownViewer from '@/components/MarkdownViewer.vue';
 import "@/assets/styles/analysis-result.css";
-
-const VUE_APP_BASE_URL = process.env.VUE_APP_BASE_URL || 'http://localhost:5000';
-const apiClient = axios.create({ baseURL: VUE_APP_BASE_URL });
 
 export default {
   components: { MarkdownViewer },

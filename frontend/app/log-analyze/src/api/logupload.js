@@ -1,8 +1,7 @@
 import productApi from '@/api/product';
 import moduleApi from '@/api/module';
-import axios from "axios";
-
-const VUE_APP_BASE_URL = process.env.VUE_APP_BASE_URL || "http://localhost:5000";
+import apiClient from '@/api/client';
+import { getToken } from '@/auth/session';
 
 export default {
   data() {
@@ -15,11 +14,15 @@ export default {
       selectedBranch: null,
       selectedBranchVersion: null,
       fileList: [],
-      uploadUrl: `${VUE_APP_BASE_URL}/logfile/upload`,
+      uploadUrl: `${apiClient.defaults.baseURL}/logfile/upload`,
     };
   },
 
   computed: {
+    uploadHeaders() {
+      const token = getToken();
+      return token ? { Authorization: `Bearer ${token}` } : {};
+    },
     // 根据 `selectedBranch` 过滤出对应的 `branchVersions`
     filteredBranchVersions() {
       const selectedBranchObj = this.branches.find(b => b.address === this.selectedBranch);
@@ -96,7 +99,7 @@ export default {
       this.selectedBranchVersion = null; // 重置版本选择
     },
 
-    beforeUpload(file) {
+    beforeUpload() {
       if (!this.selectedProduct || !this.selectedModule || !this.selectedBranch || !this.selectedBranchVersion) {
         this.$message.error("请先选择产品、模块、分支地址和分支版本");
         return false;
