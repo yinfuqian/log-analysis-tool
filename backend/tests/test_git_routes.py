@@ -29,6 +29,10 @@ from app.git.models import GitRef
 from extensions import db
 
 
+def create_test_app():
+    return create_app(config_overrides={"TESTING": True, "AUTH_TEST_BYPASS": True})
+
+
 class GitRoutesTests(unittest.TestCase):
     def test_build_authenticated_git_url_injects_configured_credentials(self):
         url = build_authenticated_git_url(
@@ -137,7 +141,7 @@ class GitRoutesTests(unittest.TestCase):
                         del sys.modules["flask"]
                     if "celery.result" in sys.modules and not hasattr(sys.modules["celery.result"], "GroupResult"):
                         del sys.modules["celery.result"]
-                    app = create_app()
+                    app = create_test_app()
 
                     response = app.test_client().get(
                         "/git/branches",
@@ -167,7 +171,7 @@ class GitRoutesTests(unittest.TestCase):
                     del sys.modules["flask"]
                 if "celery.result" in sys.modules and not hasattr(sys.modules["celery.result"], "GroupResult"):
                     del sys.modules["celery.result"]
-                app = create_app()
+                app = create_test_app()
 
                 response = app.test_client().get(
                     "/git/branches",
@@ -198,7 +202,7 @@ class GitRoutesTests(unittest.TestCase):
                         del sys.modules["flask"]
                     if "celery.result" in sys.modules and not hasattr(sys.modules["celery.result"], "GroupResult"):
                         del sys.modules["celery.result"]
-                    app = create_app()
+                    app = create_test_app()
 
                     response = app.test_client().get(
                         "/git/branches",
@@ -273,7 +277,7 @@ class GitRoutesTests(unittest.TestCase):
                     del sys.modules["flask"]
                 if "celery.result" in sys.modules and not hasattr(sys.modules["celery.result"], "GroupResult"):
                     del sys.modules["celery.result"]
-                app = create_app()
+                app = create_test_app()
 
                 response = app.test_client().get(
                     "/git/branches",
@@ -301,7 +305,7 @@ class GitRoutesTests(unittest.TestCase):
                     del sys.modules["flask"]
                 if "celery.result" in sys.modules and not hasattr(sys.modules["celery.result"], "GroupResult"):
                     del sys.modules["celery.result"]
-                app = create_app()
+                app = create_test_app()
 
                 response = app.test_client().get(
                     "/git/branches",
@@ -324,7 +328,7 @@ class GitRoutesTests(unittest.TestCase):
                 "created_modules": 1,
                 "created_branches": 1,
             }
-            app = create_app()
+            app = create_test_app()
 
             response = app.test_client().post("/git/sync-projects")
 
@@ -343,7 +347,7 @@ class GitRoutesTests(unittest.TestCase):
         with patch.object(git_routes, "acquire_sync_lock", return_value=False) as acquire_lock:
             with patch.object(git_routes, "release_sync_lock") as release_lock:
                 with patch.object(git_routes, "sync_gitlab_projects_from_config") as sync:
-                    app = create_app()
+                    app = create_test_app()
 
                     response = app.test_client().post("/git/sync-projects")
 
@@ -364,7 +368,7 @@ class GitRoutesTests(unittest.TestCase):
             with patch.object(git_routes, "release_sync_lock") as release_lock:
                 with patch.object(git_routes, "sync_gitlab_projects_from_config") as sync:
                     sync.return_value = {"fetched_projects": 1, "synced_projects": 1}
-                    app = create_app()
+                    app = create_test_app()
 
                     response = app.test_client().post("/git/sync-projects")
 
