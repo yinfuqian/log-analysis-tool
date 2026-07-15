@@ -90,6 +90,19 @@ class AsyncConfigTests(unittest.TestCase):
         self.assertTrue(config.SQLALCHEMY_ENGINE_OPTIONS["pool_pre_ping"])
         self.assertGreater(config.SQLALCHEMY_ENGINE_OPTIONS["pool_recycle"], 0)
 
+    def test_authentication_settings_are_environment_driven(self):
+        env = {
+            "AUTH_USERS_FILE": "C:/secure/users.json",
+            "AUTH_LOGIN_MAX_FAILURES": "7",
+            "AUTH_LOGIN_WINDOW_SECONDS": "420",
+        }
+        with patch.dict(os.environ, env, clear=False):
+            config = load_config_module().Config
+
+        self.assertEqual(config.AUTH_USERS_FILE, "C:/secure/users.json")
+        self.assertEqual(config.AUTH_LOGIN_MAX_FAILURES, 7)
+        self.assertEqual(config.AUTH_LOGIN_WINDOW_SECONDS, 420)
+
     def test_dotenv_loader_sets_missing_values_without_overriding_existing_env(self):
         module = load_config_module()
         with tempfile.TemporaryDirectory() as tmpdir:

@@ -114,6 +114,11 @@ class Config:
     REDIS_HEALTH_CHECK_INTERVAL = int(os.getenv("REDIS_HEALTH_CHECK_INTERVAL", "30"))
     CELERY_BROKER_SOCKET_TIMEOUT = int(os.getenv("CELERY_BROKER_SOCKET_TIMEOUT", "360"))
 
+    # Authentication configuration
+    AUTH_USERS_FILE = os.getenv("AUTH_USERS_FILE", "/data/users.json")
+    AUTH_LOGIN_MAX_FAILURES = int(os.getenv("AUTH_LOGIN_MAX_FAILURES", "5"))
+    AUTH_LOGIN_WINDOW_SECONDS = int(os.getenv("AUTH_LOGIN_WINDOW_SECONDS", "300"))
+
     # Git 用户密码（敏感信息建议用环境变量）
     GIT_BASE_URL = os.getenv("GIT_BASE_URL", "")
     GIT_USER = os.getenv("GIT_USER", "")
