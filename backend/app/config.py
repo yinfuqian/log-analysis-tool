@@ -65,6 +65,11 @@ def _build_redis_url():
     return f"redis://{auth}{host}:{port}/{database}"
 
 class Config:
+    MAX_CONTENT_LENGTH = int(os.getenv("MAX_CONTENT_LENGTH", str(120 * 1024 * 1024)))
+    MAX_LOG_BYTES = int(os.getenv("MAX_LOG_BYTES", str(100 * 1024 * 1024)))
+    MAX_IMAGE_BYTES = int(os.getenv("MAX_IMAGE_BYTES", str(10 * 1024 * 1024)))
+    MAX_IMAGE_COUNT = int(os.getenv("MAX_IMAGE_COUNT", "10"))
+    MAX_IMAGE_PIXELS = int(os.getenv("MAX_IMAGE_PIXELS", "40000000"))
     # 存储类型: 'local'（本地存储） | 'minio'（MinIO） | 'nas'（NAS）
     STORAGE_TYPE = os.getenv("STORAGE_TYPE", "local")
 

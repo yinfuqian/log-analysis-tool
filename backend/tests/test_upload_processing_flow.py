@@ -2,9 +2,12 @@ import gzip
 import importlib.util
 import io
 import sys
+import tempfile
 import types
 import unittest
 from pathlib import Path
+
+from PIL import Image
 
 
 BACKEND_DIR = Path(__file__).resolve().parents[1]
@@ -20,10 +23,16 @@ class UploadedFileStub:
 class ImageFileStub:
     def __init__(self, filename, data):
         self.filename = filename
-        self._data = data
+        self.stream = io.BytesIO(data)
 
-    def read(self):
-        return self._data
+    def read(self, size=-1):
+        return self.stream.read(size)
+
+
+def make_image_bytes(image_format):
+    buffer = io.BytesIO()
+    Image.new("RGB", (8, 8), color="white").save(buffer, format=image_format)
+    return buffer.getvalue()
 
 
 def install_route_stubs():
@@ -47,7 +56,12 @@ def install_route_stubs():
 
     for name in ["app", "app.logfile", "app.logfile.routes"]:
         module = types.ModuleType(name)
-        module.__path__ = [str(ROUTES_DIR)] if name == "app.logfile.routes" else []
+        if name == "app":
+            module.__path__ = [str(BACKEND_DIR / "app")]
+        elif name == "app.logfile":
+            module.__path__ = [str(BACKEND_DIR / "app" / "logfile")]
+        else:
+            module.__path__ = [str(ROUTES_DIR)]
         sys.modules[name] = module
 
     models_stub = types.ModuleType("app.logfile.models")
@@ -192,8 +206,8 @@ class UploadProcessingFlowTests(unittest.TestCase):
 
         result = routes.prepare_uploaded_images(
             [
-                ImageFileStub("query.png", b"first"),
-                ImageFileStub("error.jpg", b"second"),
+                ImageFileStub("query.png", make_image_bytes("PNG")),
+                ImageFileStub("error.jpg", make_image_bytes("JPEG")),
             ],
             product_name="product",
             module_name="module",
@@ -207,6 +221,35 @@ class UploadProcessingFlowTests(unittest.TestCase):
         self.assertTrue(result[0]["file_path"].endswith(".png"))
         self.assertTrue(result[1]["file_path"].endswith(".jpg"))
         self.assertEqual(result[0]["original_filename"], "query.png")
+
+    def test_prepare_uploaded_images_removes_earlier_files_when_later_save_fails(self):
+        routes = load_routes_module()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            first_path = Path(temp_dir) / "first.png"
+            calls = []
+
+            def save_with_failure(file_bytes, filename):
+                calls.append(filename)
+                if len(calls) == 2:
+                    raise OSError("disk full")
+                first_path.write_bytes(file_bytes)
+                return str(first_path)
+
+            routes.save_binary_upload_file = save_with_failure
+
+            with self.assertRaisesRegex(OSError, "disk full"):
+                routes.prepare_uploaded_images(
+                    [
+                        ImageFileStub("first.png", make_image_bytes("PNG")),
+                        ImageFileStub("second.png", make_image_bytes("PNG")),
+                    ],
+                    product_name="product",
+                    module_name="module",
+                    address="https://code.example/group/repo.git",
+                    tag_version="master",
+                )
+
+            self.assertFalse(first_path.exists())
 
 
 if __name__ == "__main__":

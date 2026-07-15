@@ -3,6 +3,8 @@ import re
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 
+from app.uploads.validation import read_upload_bytes
+
 
 class LogProcessingError(ValueError):
     pass
@@ -26,8 +28,8 @@ TIMESTAMP_PATTERNS = [
 ]
 
 
-def read_uploaded_log_lines(uploaded_file, filename: str) -> list[str]:
-    raw_content = _read_uploaded_bytes(uploaded_file)
+def read_uploaded_log_lines(uploaded_file, filename: str, max_bytes=None) -> list[str]:
+    raw_content = _read_uploaded_bytes(uploaded_file, max_bytes=max_bytes)
     if filename.lower().endswith(".gz"):
         try:
             raw_content = gzip.decompress(raw_content)
@@ -125,9 +127,11 @@ def filter_lines_by_date(lines: list[str], target_date: date | None) -> DateFilt
     )
 
 
-def _read_uploaded_bytes(uploaded_file) -> bytes:
+def _read_uploaded_bytes(uploaded_file, max_bytes=None) -> bytes:
     stream = getattr(uploaded_file, "stream", None)
     if stream is not None:
+        if max_bytes is not None:
+            return read_upload_bytes(stream, max_bytes=max_bytes, label="日志文件")
         try:
             stream.seek(0)
         except (AttributeError, OSError):
@@ -138,6 +142,8 @@ def _read_uploaded_bytes(uploaded_file) -> bytes:
         uploaded_file.seek(0)
     except (AttributeError, OSError):
         pass
+    if max_bytes is not None:
+        return read_upload_bytes(uploaded_file, max_bytes=max_bytes, label="日志文件")
     return uploaded_file.read()
 
 

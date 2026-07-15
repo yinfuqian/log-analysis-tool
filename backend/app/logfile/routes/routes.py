@@ -8,6 +8,11 @@ from dataclasses import dataclass
 from flask import Blueprint, current_app as app, jsonify, request
 
 from app.logfile.models import Log
+from app.uploads.validation import (
+    UploadValidationError,
+    validate_image_count,
+    validate_image_upload,
+)
 from extensions import db
 
 from .log_processing import (
@@ -69,7 +74,9 @@ def get_uploaded_image_files(files):
 
 
 def prepare_uploaded_images(uploaded_files, product_name, module_name, address, tag_version):
-    prepared_images = []
+    config = getattr(app, "config", {})
+    validate_image_count(uploaded_files, config.get("MAX_IMAGE_COUNT", 10))
+    validated_images = []
     for index, uploaded_file in enumerate(uploaded_files or [], start=1):
         original_filename = uploaded_file.filename or ""
         if not original_filename:
@@ -80,23 +87,42 @@ def prepare_uploaded_images(uploaded_files, product_name, module_name, address, 
         image_name = sanitize_filename(
             build_upload_image_name(product_name, module_name, address, tag_version, original_filename)
         )
-        file_bytes = uploaded_file.read()
-        if not file_bytes:
-            raise LogProcessingError("图片内容为空")
-
-        prepared_images.append(
+        file_bytes = validate_image_upload(
+            original_filename,
+            getattr(uploaded_file, "stream", uploaded_file),
+            max_bytes=config.get("MAX_IMAGE_BYTES", 10 * 1024 * 1024),
+            max_pixels=config.get("MAX_IMAGE_PIXELS", 40_000_000),
+        )
+        validated_images.append(
             {
                 "sequence": index,
                 "log_name": image_name,
-                "file_path": save_binary_upload_file(file_bytes, image_name),
+                "file_bytes": file_bytes,
                 "original_filename": original_filename,
             }
         )
+    prepared_images = []
+    try:
+        for image in validated_images:
+            file_path = save_binary_upload_file(image.pop("file_bytes"), image["log_name"])
+            prepared_images.append({**image, "file_path": file_path})
+    except Exception:
+        for image in prepared_images:
+            try:
+                os.remove(image["file_path"])
+            except OSError:
+                pass
+        raise
     return prepared_images
 
 
 def prepare_uploaded_log(uploaded_file, original_filename, log_name, date_filter=None):
-    raw_lines = read_uploaded_log_lines(uploaded_file, original_filename)
+    config = getattr(app, "config", {})
+    raw_lines = read_uploaded_log_lines(
+        uploaded_file,
+        original_filename,
+        max_bytes=config.get("MAX_LOG_BYTES", 100 * 1024 * 1024),
+    )
     target_date = resolve_target_date(date_filter)
     filter_result = filter_lines_by_date(raw_lines, target_date)
 
@@ -167,9 +193,9 @@ def upload_log():
 
     try:
         prepared_upload = prepare_uploaded_log(uploaded_file, original_filename, log_name, date_filter)
-    except LogProcessingError as exc:
+    except (LogProcessingError, UploadValidationError) as exc:
         app.logger.error(f"日志文件处理失败: {exc}")
-        return jsonify({"error": str(exc)}), 400
+        return jsonify({"error": str(exc)}), getattr(exc, "status_code", 400)
 
     output_name = prepared_upload.output_filename
     processed_file_path = save_processed_log_file(prepared_upload.lines_to_save, output_name)
@@ -226,8 +252,8 @@ def upload_image():
             address=address,
             tag_version=tag_version,
         )
-    except LogProcessingError as exc:
-        return jsonify({"error": str(exc)}), 400
+    except (LogProcessingError, UploadValidationError) as exc:
+        return jsonify({"error": str(exc)}), getattr(exc, "status_code", 400)
 
     uploaded_images = []
     for prepared_image in prepared_images:
