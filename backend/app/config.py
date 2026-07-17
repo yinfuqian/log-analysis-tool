@@ -120,7 +120,7 @@ class Config:
     CELERY_BROKER_SOCKET_TIMEOUT = int(os.getenv("CELERY_BROKER_SOCKET_TIMEOUT", "360"))
 
     # Authentication configuration
-    AUTH_USERS_FILE = os.getenv("AUTH_USERS_FILE", "/data/users.json")
+    AUTH_USERS_FILE = os.getenv("AUTH_USERS_FILE", "/data/users.csv")
     AUTH_LOGIN_MAX_FAILURES = int(os.getenv("AUTH_LOGIN_MAX_FAILURES", "5"))
     AUTH_LOGIN_WINDOW_SECONDS = int(os.getenv("AUTH_LOGIN_WINDOW_SECONDS", "300"))
 

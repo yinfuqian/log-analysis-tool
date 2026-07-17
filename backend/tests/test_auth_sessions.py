@@ -1,9 +1,6 @@
-import json
 import tempfile
 import unittest
 from pathlib import Path
-
-from werkzeug.security import generate_password_hash
 
 from app.auth.sessions import SessionService
 from app.auth.users import UserStore
@@ -35,8 +32,8 @@ class FakeRedis:
 class SessionServiceTests(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
-        self.users_path = Path(self.temp_dir.name) / "users.json"
-        self.write_user("1")
+        self.users_path = Path(self.temp_dir.name) / "users.csv"
+        self.write_user("secret", 1)
         self.users = UserStore(self.users_path)
         self.redis = FakeRedis()
         self.sessions = SessionService(self.redis, self.users, max_failures=2, failure_window_seconds=60)
@@ -44,16 +41,9 @@ class SessionServiceTests(unittest.TestCase):
     def tearDown(self):
         self.temp_dir.cleanup()
 
-    def write_user(self, version):
+    def write_user(self, password, status):
         self.users_path.write_text(
-            json.dumps({
-                "users": [{
-                    "username": "alice",
-                    "password_hash": generate_password_hash("secret", method="scrypt"),
-                    "enabled": True,
-                    "credential_version": version,
-                }]
-            }),
+            f"username,password,status\nalice,{password},{status}\n",
             encoding="utf-8",
         )
 
@@ -64,12 +54,21 @@ class SessionServiceTests(unittest.TestCase):
         self.sessions.revoke(token)
         self.assertIsNone(self.sessions.authenticate(token))
 
-    def test_credential_version_change_invalidates_session(self):
+    def test_password_change_invalidates_session(self):
         token = self.sessions.create(self.users.get_user("alice"))
 
-        self.write_user("2")
+        self.write_user("new-secret", 1)
 
         self.assertIsNone(self.sessions.authenticate(token))
+
+    def test_status_zero_and_two_invalidate_session(self):
+        for status in (0, 2):
+            self.write_user("secret", 1)
+            token = self.sessions.create(self.users.get_user("alice"))
+
+            self.write_user("secret", status)
+
+            self.assertIsNone(self.sessions.authenticate(token))
 
     def test_login_failures_are_rate_limited(self):
         self.assertFalse(self.sessions.register_failure("alice", "127.0.0.1"))

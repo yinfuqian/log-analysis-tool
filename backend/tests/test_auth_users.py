@@ -1,123 +1,82 @@
-import json
 import tempfile
 import unittest
 from pathlib import Path
-
-from werkzeug.security import generate_password_hash
 
 from app.auth.users import UserStore
 
 
 class UserStoreTests(unittest.TestCase):
-    def test_loads_user_and_verifies_password(self):
-        with tempfile.TemporaryDirectory() as temp_dir:
-            users_path = Path(temp_dir) / "users.json"
-            users_path.write_text(
-                json.dumps({
-                    "users": [
-                        {
-                            "username": "Alice",
-                            "password_hash": generate_password_hash("secret", method="scrypt"),
-                            "enabled": True,
-                            "credential_version": "1",
-                        }
-                    ]
-                }),
-                encoding="utf-8",
-            )
+    def write_csv(self, path, rows):
+        path.write_text(
+            "username,password,status\n" + "\n".join(rows) + "\n",
+            encoding="utf-8",
+        )
 
-            store = UserStore(users_path)
+    def test_loads_csv_user_and_verifies_plaintext_password(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "users.csv"
+            self.write_csv(path, ["Alice,secret,1"])
+
+            store = UserStore(path)
 
             user = store.verify_password(" alice ", "secret")
-            self.assertIsNotNone(user)
             self.assertEqual(user.username, "alice")
-            self.assertEqual(user.credential_version, "1")
+            self.assertEqual(user.status, 1)
+            self.assertNotEqual(user.credential_version, "secret")
             self.assertIsNone(store.verify_password("alice", "wrong"))
+
+    def test_status_zero_and_two_cannot_authenticate(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "users.csv"
+            self.write_csv(path, ["disabled,secret,0", "forced,secret,2"])
+            store = UserStore(path)
+
+            self.assertIsNone(store.verify_password("disabled", "secret"))
+            self.assertIsNone(store.verify_password("forced", "secret"))
 
     def test_rejects_duplicate_normalized_usernames(self):
         with tempfile.TemporaryDirectory() as temp_dir:
-            users_path = Path(temp_dir) / "users.json"
-            password_hash = generate_password_hash("secret", method="scrypt")
-            users_path.write_text(
-                json.dumps({
-                    "users": [
-                        {"username": "Alice", "password_hash": password_hash},
-                        {"username": " alice ", "password_hash": password_hash},
-                    ]
-                }),
-                encoding="utf-8",
-            )
+            path = Path(temp_dir) / "users.csv"
+            self.write_csv(path, ["Alice,one,1", " alice ,two,1"])
 
             with self.assertRaisesRegex(ValueError, "用户名重复"):
-                UserStore(users_path)
+                UserStore(path)
 
-    def test_rejects_plaintext_passwords(self):
+    def test_rejects_invalid_status_and_missing_columns(self):
         with tempfile.TemporaryDirectory() as temp_dir:
-            users_path = Path(temp_dir) / "users.json"
-            users_path.write_text(
-                json.dumps({
-                    "users": [
-                        {"username": "alice", "password_hash": "secret"},
-                    ]
-                }),
-                encoding="utf-8",
-            )
+            path = Path(temp_dir) / "users.csv"
+            self.write_csv(path, ["alice,secret,9"])
+            with self.assertRaisesRegex(ValueError, "状态"):
+                UserStore(path)
 
-            with self.assertRaisesRegex(ValueError, "密码哈希"):
-                UserStore(users_path)
+            path.write_text("username,password\nalice,secret\n", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "字段"):
+                UserStore(path)
 
     def test_invalid_hot_reload_keeps_last_valid_snapshot(self):
         with tempfile.TemporaryDirectory() as temp_dir:
-            users_path = Path(temp_dir) / "users.json"
-            users_path.write_text(
-                json.dumps({
-                    "users": [{
-                        "username": "alice",
-                        "password_hash": generate_password_hash("secret", method="scrypt"),
-                        "credential_version": "1",
-                    }]
-                }),
-                encoding="utf-8",
-            )
-            store = UserStore(users_path)
+            path = Path(temp_dir) / "users.csv"
+            self.write_csv(path, ["alice,secret,1"])
+            store = UserStore(path)
 
-            users_path.write_text("{broken", encoding="utf-8")
+            path.write_text("broken", encoding="utf-8")
 
-            user = store.get_user("alice")
-            self.assertIsNotNone(user)
-            self.assertEqual(user.credential_version, "1")
+            self.assertIsNotNone(store.verify_password("alice", "secret"))
             self.assertIsNotNone(store.last_reload_error)
 
-    def test_valid_hot_reload_replaces_snapshot(self):
+    def test_valid_hot_reload_replaces_password_status_and_deleted_users(self):
         with tempfile.TemporaryDirectory() as temp_dir:
-            users_path = Path(temp_dir) / "users.json"
-            users_path.write_text(
-                json.dumps({
-                    "users": [{
-                        "username": "alice",
-                        "password_hash": generate_password_hash("secret", method="scrypt"),
-                        "credential_version": "1",
-                    }]
-                }),
-                encoding="utf-8",
-            )
-            store = UserStore(users_path)
+            path = Path(temp_dir) / "users.csv"
+            self.write_csv(path, ["alice,secret,1", "bob,password,1"])
+            store = UserStore(path)
+            old_version = store.get_user("alice").credential_version
 
-            users_path.write_text(
-                json.dumps({
-                    "users": [{
-                        "username": "alice",
-                        "password_hash": generate_password_hash("new-secret", method="scrypt"),
-                        "credential_version": "version-two",
-                    }]
-                }),
-                encoding="utf-8",
-            )
+            self.write_csv(path, ["alice,new-secret,2"])
 
-            user = store.get_user("alice")
-            self.assertEqual(user.credential_version, "version-two")
-            self.assertIsNone(store.verify_password("alice", "secret"))
-            self.assertIsNotNone(store.verify_password("alice", "new-secret"))
+            alice = store.get_user("alice")
+            self.assertNotEqual(alice.credential_version, old_version)
+            self.assertIsNone(store.verify_password("alice", "new-secret"))
+            self.assertIsNone(store.get_user("bob"))
 
 
 if __name__ == "__main__":

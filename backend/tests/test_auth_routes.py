@@ -1,10 +1,8 @@
-import json
 import tempfile
 import unittest
 from pathlib import Path
 
 from flask import Flask, jsonify
-from werkzeug.security import generate_password_hash
 
 from app.auth.middleware import install_authentication
 from app.auth.routes import auth_bp
@@ -41,8 +39,8 @@ class FakeRedis:
 class AuthRoutesTests(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
-        self.users_path = Path(self.temp_dir.name) / "users.json"
-        self.write_user("1")
+        self.users_path = Path(self.temp_dir.name) / "users.csv"
+        self.write_user()
         self.users = UserStore(self.users_path)
         self.redis = FakeRedis()
         self.sessions = SessionService(self.redis, self.users, max_failures=2, failure_window_seconds=60)
@@ -68,16 +66,9 @@ class AuthRoutesTests(unittest.TestCase):
                 application.logger.removeHandler(handler)
         self.temp_dir.cleanup()
 
-    def write_user(self, version):
+    def write_user(self, password="secret", status=1):
         self.users_path.write_text(
-            json.dumps({
-                "users": [{
-                    "username": "alice",
-                    "password_hash": generate_password_hash("secret", method="scrypt"),
-                    "enabled": True,
-                    "credential_version": version,
-                }]
-            }),
+            f"username,password,status\nalice,{password},{status}\n",
             encoding="utf-8",
         )
 
@@ -111,7 +102,7 @@ class AuthRoutesTests(unittest.TestCase):
 
     def test_credential_version_change_invalidates_existing_token(self):
         token = self.login()
-        self.write_user("2")
+        self.write_user("new-secret")
 
         response = self.client.get("/private", headers={"Authorization": f"Bearer {token}"})
 
@@ -146,7 +137,7 @@ class AuthRoutesTests(unittest.TestCase):
         app = create_app(
             config_overrides={
                 "TESTING": True,
-                "AUTH_USERS_FILE": str(Path(self.temp_dir.name) / "missing-users.json"),
+                "AUTH_USERS_FILE": str(Path(self.temp_dir.name) / "missing-users.csv"),
                 "SQLALCHEMY_DATABASE_URI": "sqlite:///:memory:",
                 "LOG_DIR": self.temp_dir.name,
                 "LOGGING_FILE": "NUL",
