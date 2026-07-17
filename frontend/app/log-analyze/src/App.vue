@@ -48,6 +48,7 @@
 
 <script>
 import { HomeFilled, UploadFilled, Document } from '@element-plus/icons-vue';
+import { ElMessage } from 'element-plus';
 import apiClient from '@/api/client';
 import { clearToken } from '@/auth/session';
 
@@ -60,13 +61,18 @@ export default {
   },
   mounted() {
     window.addEventListener('auth:unauthorized', this.handleUnauthorized);
+    window.addEventListener('auth:required', this.handleAuthenticationRequired);
   },
   beforeUnmount() {
     window.removeEventListener('auth:unauthorized', this.handleUnauthorized);
+    window.removeEventListener('auth:required', this.handleAuthenticationRequired);
   },
   methods: {
     handleUnauthorized() {
       this.$router.replace({ name: 'Login' });
+    },
+    handleAuthenticationRequired() {
+      ElMessage.warning('请先登录后再使用该功能');
     },
     async logout() {
       try {

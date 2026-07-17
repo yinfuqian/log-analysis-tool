@@ -43,7 +43,7 @@ describe('application session', () => {
     expect(config.headers.Authorization).toBe('Bearer token-value')
   })
 
-  test('401 handling clears the current session', () => {
+  test('401 handling clears an expired session', () => {
     setToken('token-value')
 
     handleUnauthorized()
@@ -51,10 +51,19 @@ describe('application session', () => {
     expect(getToken()).toBeNull()
   })
 
-  test('protected routes redirect anonymous users to login', () => {
+  test('anonymous 401 asks for login without treating it as an expired session', () => {
+    const required = jest.fn()
+    window.addEventListener('auth:required', required, { once: true })
+
+    handleUnauthorized()
+
+    expect(required).toHaveBeenCalledTimes(1)
+  })
+
+  test('anonymous users can browse business routes', () => {
     const result = authGuard({ name: 'Dashboard', meta: { requiresAuth: true } })
 
-    expect(result).toEqual({ name: 'Login' })
+    expect(result).toBe(true)
   })
 
   test('authenticated users can enter protected routes', () => {

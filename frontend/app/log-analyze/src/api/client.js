@@ -22,9 +22,10 @@ export function applyAuthHeader(config) {
 
 
 export function handleUnauthorized() {
+  const hadToken = Boolean(getToken())
   clearToken()
   if (typeof window !== 'undefined') {
-    window.dispatchEvent(new CustomEvent('auth:unauthorized'))
+    window.dispatchEvent(new CustomEvent(hadToken ? 'auth:unauthorized' : 'auth:required'))
   }
 }
 
