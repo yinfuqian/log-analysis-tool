@@ -12,6 +12,7 @@ from app.logfile.routes.routes import logfile_bp
 from app.modules.routes.routes import module_bp
 from app.product.routes.routes import product_bp
 from app.auth.middleware import install_authentication
+from app.auth.account_requests import build_account_request_service
 from app.auth.routes import auth_bp
 from app.auth.sessions import SessionService
 from app.auth.users import UnavailableUserStore, UserStore
@@ -48,6 +49,7 @@ def create_app(config_overrides=None, redis_client=None):
     )
     app.extensions["auth_users"] = user_store
     app.extensions["auth_sessions"] = session_service
+    app.extensions["account_request_service"] = build_account_request_service(app.config)
 
     app.register_blueprint(auth_bp, url_prefix="/auth")
     app.register_blueprint(health_bp, url_prefix="/health")

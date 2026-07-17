@@ -1,5 +1,7 @@
 from flask import Blueprint, current_app, g, jsonify, request
 
+from .account_requests import AccountRequestError
+
 
 auth_bp = Blueprint("auth", __name__)
 
@@ -35,6 +37,23 @@ def login():
     sessions.clear_failures(username, source_ip)
     token = sessions.create(user)
     return jsonify({"token": token, "username": user.username})
+
+
+@auth_bp.post("/account-requests")
+def request_account():
+    payload = request.get_json(silent=True) or {}
+    service = current_app.extensions["account_request_service"]
+    try:
+        result = service.submit(
+            payload.get("username"),
+            payload.get("password"),
+            payload.get("applicant_name"),
+        )
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    except AccountRequestError:
+        return jsonify({"error": "账号申请失败，请联系管理员"}), 502
+    return jsonify(result), 202
 
 
 @auth_bp.post("/logout")

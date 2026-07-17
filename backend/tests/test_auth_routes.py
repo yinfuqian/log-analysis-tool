@@ -5,6 +5,7 @@ from pathlib import Path
 from flask import Flask, jsonify
 
 from app.auth.middleware import install_authentication
+from app.auth.account_requests import AccountRequestService, MockAccountRequestProvider
 from app.auth.routes import auth_bp
 from app.auth.sessions import SessionService
 from app.auth.users import UserStore
@@ -48,6 +49,7 @@ class AuthRoutesTests(unittest.TestCase):
         app = Flask(__name__)
         app.config.update(TESTING=True)
         app.extensions["auth_sessions"] = self.sessions
+        app.extensions["account_request_service"] = AccountRequestService(MockAccountRequestProvider())
         app.register_blueprint(auth_bp, url_prefix="/auth")
         app.register_blueprint(health_bp, url_prefix="/health")
 
@@ -111,6 +113,15 @@ class AuthRoutesTests(unittest.TestCase):
     def test_health_and_preflight_are_anonymous(self):
         self.assertEqual(self.client.get("/health/live").status_code, 200)
         self.assertEqual(self.client.open("/private", method="OPTIONS").status_code, 200)
+
+    def test_account_request_is_anonymous(self):
+        response = self.client.post("/auth/account-requests", json={
+            "username": "new-user",
+            "password": "secret",
+            "applicant_name": "张三",
+        })
+
+        self.assertEqual(response.status_code, 202)
 
     def test_application_factory_protects_registered_business_blueprints(self):
         from app import create_app

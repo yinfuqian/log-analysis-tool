@@ -1,7 +1,7 @@
 from flask import g, jsonify, request
 
 
-ANONYMOUS_ENDPOINTS = {"auth.login", "health.live", "health.ready"}
+ANONYMOUS_ENDPOINTS = {"auth.login", "auth.request_account", "health.live", "health.ready"}
 
 
 def extract_bearer_token(header_value):

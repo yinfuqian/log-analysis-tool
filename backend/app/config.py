@@ -123,6 +123,10 @@ class Config:
     AUTH_USERS_FILE = os.getenv("AUTH_USERS_FILE", "/data/users.csv")
     AUTH_LOGIN_MAX_FAILURES = int(os.getenv("AUTH_LOGIN_MAX_FAILURES", "5"))
     AUTH_LOGIN_WINDOW_SECONDS = int(os.getenv("AUTH_LOGIN_WINDOW_SECONDS", "300"))
+    ACCOUNT_REQUEST_PROVIDER = os.getenv("ACCOUNT_REQUEST_PROVIDER", "mock")
+    ACCOUNT_REQUEST_API_URL = os.getenv("ACCOUNT_REQUEST_API_URL", "")
+    ACCOUNT_REQUEST_API_TOKEN = os.getenv("ACCOUNT_REQUEST_API_TOKEN", "")
+    ACCOUNT_REQUEST_API_TIMEOUT = int(os.getenv("ACCOUNT_REQUEST_API_TIMEOUT", "10"))
 
     # Git 用户密码（敏感信息建议用环境变量）
     GIT_BASE_URL = os.getenv("GIT_BASE_URL", "")
