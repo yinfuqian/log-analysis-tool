@@ -16,6 +16,7 @@ from app.auth.account_requests import build_account_request_service
 from app.auth.routes import auth_bp
 from app.auth.sessions import SessionService
 from app.auth.users import UnavailableUserStore, UserStore
+from app.audit.service import install_operation_audit
 from app.health.routes import health_bp
 from extensions import db, migrate, init_redis, init_celery
 
@@ -59,6 +60,7 @@ def create_app(config_overrides=None, redis_client=None):
     app.register_blueprint(analysis_bp, url_prefix="/analysis")
     app.register_blueprint(git_bp, url_prefix="/git")
     app.register_blueprint(dashboard_bp, url_prefix="/dashboard")
+    install_operation_audit(app)
     install_authentication(app, session_service)
 
     return app
