@@ -38,7 +38,11 @@ class LoginWindow:
         ttk.Label(frame, textvariable=self.status, foreground="#64748b").pack(anchor=tk.W, pady=(0, 12))
         self.login_button = ttk.Button(frame, text="登录", command=self._submit)
         self.login_button.pack(fill=tk.X)
+        ttk.Button(frame, text="申请账号", command=self._open_account_request).pack(fill=tk.X, pady=(8, 0))
         username_entry.focus_set()
+
+    def _open_account_request(self):
+        AccountRequestDialog(self.window, self.client)
 
     def exists(self):
         return bool(self.window.winfo_exists())
@@ -90,3 +94,83 @@ class LoginWindow:
             self.window.grab_release()
             self.window.destroy()
         self.on_cancel()
+
+
+class AccountRequestDialog:
+    def __init__(self, parent, client):
+        self.parent = parent
+        self.client = client
+        self.window = tk.Toplevel(parent)
+        self.window.title("申请账号")
+        self.window.geometry("420x360")
+        self.window.resizable(False, False)
+        self.window.transient(parent)
+        self.window.grab_set()
+        self.applicant_name = tk.StringVar()
+        self.username = tk.StringVar()
+        self.password = tk.StringVar()
+        self.status = tk.StringVar(value="请填写申请信息")
+        self._build_layout()
+
+    def _build_layout(self):
+        frame = ttk.Frame(self.window, padding=24)
+        frame.pack(fill=tk.BOTH, expand=True)
+        ttk.Label(frame, text="申请账号", font=("Microsoft YaHei UI", 16, "bold")).pack(anchor=tk.W, pady=(0, 16))
+        for label, variable, show in (
+            ("申请人姓名", self.applicant_name, None),
+            ("申请用户名", self.username, None),
+            ("申请密码", self.password, "●"),
+        ):
+            ttk.Label(frame, text=label).pack(anchor=tk.W)
+            ttk.Entry(frame, textvariable=variable, show=show or "").pack(fill=tk.X, pady=(4, 10))
+        ttk.Label(frame, textvariable=self.status, foreground="#64748b").pack(anchor=tk.W, pady=(0, 10))
+        self.submit_button = ttk.Button(frame, text="提交申请", command=self._submit)
+        self.submit_button.pack(fill=tk.X)
+        ttk.Button(frame, text="关闭", command=self._close).pack(fill=tk.X, pady=(8, 0))
+
+    def _submit(self):
+        applicant_name = self.applicant_name.get().strip()
+        username = self.username.get().strip()
+        password = self.password.get()
+        if not applicant_name or not username or not password:
+            self.status.set("申请人姓名、用户名和密码不能为空")
+            return
+        self.submit_button.configure(state=tk.DISABLED)
+        self.status.set("正在提交申请…")
+
+        def submit_request():
+            try:
+                result = self.client.request_account(username, password, applicant_name)
+            except Exception as exc:
+                self.parent.after(0, lambda: self._show_error(exc))
+                return
+            self.parent.after(0, lambda: self._show_success(result))
+
+        threading.Thread(target=submit_request, daemon=True).start()
+
+    def _show_success(self, result):
+        self.password.set("")
+        self.submit_button.configure(state=tk.NORMAL)
+        request_id = result.get("request_id") or ""
+        self.status.set(f"申请已提交 {request_id}".strip())
+        messagebox.showinfo("申请已提交", "账号申请已提交，请等待管理员处理", parent=self.window)
+
+    def _show_error(self, exc):
+        self.password.set("")
+        self.submit_button.configure(state=tk.NORMAL)
+        response = getattr(exc, "response", None)
+        message = "账号申请失败，请联系管理员"
+        if response is not None:
+            try:
+                payload = response.json()
+            except ValueError:
+                payload = None
+            if isinstance(payload, dict):
+                message = payload.get("error") or message
+        self.status.set(message)
+        messagebox.showerror("申请失败", message, parent=self.window)
+
+    def _close(self):
+        self.password.set("")
+        self.window.grab_release()
+        self.window.destroy()

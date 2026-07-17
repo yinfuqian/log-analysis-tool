@@ -94,6 +94,22 @@ class ApiClientAuthTests(unittest.TestCase):
             "Bearer session-token",
         )
 
+    def test_account_request_is_anonymous_and_returns_request_metadata(self):
+        session = FakeSession([FakeResponse({"request_id": "AR-1", "delivery_status": "accepted"}, status_code=202)])
+        client = ApiClient("http://backend", session=session)
+
+        result = client.request_account("new-user", "request-secret", "张三")
+
+        self.assertEqual(result["request_id"], "AR-1")
+        method, url, kwargs = session.requests[0]
+        self.assertEqual((method, url), ("POST", "http://backend/auth/account-requests"))
+        self.assertEqual(kwargs["json"], {
+            "username": "new-user",
+            "password": "request-secret",
+            "applicant_name": "张三",
+        })
+        self.assertNotIn("Authorization", kwargs.get("headers", {}))
+
     def test_log_analyzer_api_uses_authenticated_session_for_business_calls(self):
         module = load_main_module()
         session = FakeSession([FakeResponse({"products": []})])

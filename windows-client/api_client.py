@@ -43,6 +43,19 @@ class ApiClient:
         self.set_token(token)
         return payload.get("username") or str(username).strip()
 
+    def request_account(self, username, password, applicant_name):
+        response = self._request(
+            "POST",
+            "/auth/account-requests",
+            authenticated=False,
+            json={
+                "username": str(username or "").strip(),
+                "password": str(password or ""),
+                "applicant_name": str(applicant_name or "").strip(),
+            },
+        )
+        return response.json()
+
     def logout(self):
         try:
             if self.token:

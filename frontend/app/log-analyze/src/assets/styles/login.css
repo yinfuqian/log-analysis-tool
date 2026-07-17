@@ -22,6 +22,17 @@
   margin: 0;
 }
 
+.login-success {
+  color: #15803d;
+}
+
+.secondary-button {
+  margin-top: 10px;
+  color: #2563eb;
+  background: transparent !important;
+  border: 1px solid #93c5fd !important;
+}
+
 .login-subtitle {
   color: #606266;
   margin-bottom: 8px;
