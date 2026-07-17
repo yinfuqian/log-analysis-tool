@@ -1,0 +1,4 @@
+username,password,status
+admin,ChangeMe123!,1
+disabled-user,ChangeMe456!,0
+forced-offline-user,ChangeMe789!,2

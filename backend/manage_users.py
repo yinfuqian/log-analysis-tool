@@ -1,27 +1,23 @@
 import argparse
-import getpass
 
-from werkzeug.security import generate_password_hash
-
-
-def build_password_hash(password):
-    if not str(password or ""):
-        raise ValueError("密码不能为空")
-    return generate_password_hash(password, method="scrypt")
+from app.auth.users import UserStore
 
 
-def main(argv=None, password_reader=getpass.getpass):
-    parser = argparse.ArgumentParser(description="日志分析系统用户配置辅助工具")
+def validate_users_file(path):
+    store = UserStore(path)
+    return store.user_count()
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description="日志分析系统 CSV 用户文件检查工具")
     subparsers = parser.add_subparsers(dest="command", required=True)
-    subparsers.add_parser("hash-password", help="交互式生成密码哈希")
+    validate_parser = subparsers.add_parser("validate", help="检查 users.csv 格式")
+    validate_parser.add_argument("path", help="users.csv 文件路径")
     args = parser.parse_args(argv)
 
-    if args.command == "hash-password":
-        password = password_reader("请输入密码: ")
-        confirmation = password_reader("请再次输入密码: ")
-        if password != confirmation:
-            raise SystemExit("两次输入的密码不一致")
-        print(build_password_hash(password))
+    if args.command == "validate":
+        count = validate_users_file(args.path)
+        print(f"用户文件有效，共 {count} 个用户")
 
 
 if __name__ == "__main__":

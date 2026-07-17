@@ -97,6 +97,10 @@ class UserStore:
         self._reload_if_changed()
         return self._users.get(normalize_username(username))
 
+    def user_count(self):
+        self._reload_if_changed()
+        return len(self._users)
+
     def verify_password(self, username, password):
         user = self.get_user(username)
         if not user or not user.enabled:
