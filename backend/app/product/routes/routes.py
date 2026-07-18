@@ -1,3 +1,4 @@
+"""routes 模块负责本文件相关的业务流程、数据转换与依赖协作。"""
 from flask import Blueprint, request, jsonify, current_app as app
 from app.product.models import Product
 from extensions import db
@@ -6,6 +7,7 @@ product_bp = Blueprint('product', __name__)
 # 创建产品
 @product_bp.route('/add', methods=['POST'])
 def create_product():
+    """创建并返回 create_product 对应的业务数据，保持现有调用约定。"""
     data = request.get_json()
 
     # 获取请求数据
@@ -40,6 +42,7 @@ def create_product():
 # 获取所有产品或根据名称过滤获取产品
 @product_bp.route('/get', methods=['GET'])  # 相对路径，/product/
 def get_products():
+    """读取并返回 get_products 对应的业务数据，保持现有调用约定。"""
     product_name = request.args.get('name')  # 获取查询参数中的name
 
     if product_name:
@@ -59,6 +62,7 @@ def get_products():
 # 修改产品
 @product_bp.route('/edit', methods=['POST'])
 def update_product():
+    """更新 update_product 对应的业务数据，保持现有调用约定。"""
     data = request.get_json()
     product_id = data.get('id')
     product = Product.query.get_or_404(product_id)
@@ -87,6 +91,7 @@ def update_product():
 # 删除指定产品
 @product_bp.route('/delete', methods=['POST'])
 def delete_product():
+    """清理 delete_product 对应的业务数据，保持现有调用约定。"""
     data = request.get_json()
     product_id = data.get('id')
     product = Product.query.get_or_404(product_id)

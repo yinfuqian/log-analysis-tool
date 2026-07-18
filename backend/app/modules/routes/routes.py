@@ -1,3 +1,4 @@
+"""routes 模块负责本文件相关的业务流程、数据转换与依赖协作。"""
 import subprocess
 import logging
 from flask import Blueprint, request, jsonify, current_app as app
@@ -72,10 +73,42 @@ def get_product_modules():
     return jsonify({"product_id": product_id, "modules": modules_data}), 200
 
 
+@module_bp.route('/search', methods=['GET'])
+def search_modules():
+    """查找或推断并返回 search_modules 对应的业务数据，保持现有调用约定。"""
+    names_arg = request.args.get('names', '')
+    names = [name.strip() for name in names_arg.split(',') if name.strip()]
+    if not names:
+        return jsonify({"modules": []}), 200
+
+    modules = Module.query.filter(Module.name.in_(names)).all()
+    modules_data = []
+
+    for module in modules:
+        module_branch = ModuleBranch.query.filter_by(module_id=module.id).first()
+        branch_info = None
+        if module_branch:
+            branch = Branch.query.get(module_branch.branch_id)
+            if branch:
+                branch_info = {
+                    "branch_address": branch.address,
+                    "tag_version": branch.tag_version
+                }
+
+        modules_data.append({
+            "module_id": module.id,
+            "module_name": module.name,
+            "branch": branch_info
+        })
+
+    return jsonify({"modules": modules_data}), 200
+
+
 
 # 创建模块（可选关联产品）
 @module_bp.route('/add', methods=['POST'])
 def create_module():
+    """创建并返回 create_module 对应的业务数据，保持现有调用约定。"""
     try:
         data = request.json
         name = data.get('name')
@@ -156,6 +189,7 @@ def create_module():
 
 
 def check_git_permission(branch_address, git_username, git_password):
+    """校验 check_git_permission 对应的业务数据，保持现有调用约定。"""
     try:
         # 解析 URL 来提取仓库的域名和路径
         parsed_url = urlparse(branch_address)
@@ -198,6 +232,7 @@ def check_git_permission(branch_address, git_username, git_password):
 # 删除模块及关联记录
 @module_bp.route('/delete', methods=['POST'])
 def delete_module():
+    """清理 delete_module 对应的业务数据，保持现有调用约定。"""
     data = request.json
     module_id = data.get('module_id')
 
@@ -235,6 +270,7 @@ def delete_module():
 ## 更新模块
 @module_bp.route('/update', methods=['POST'])
 def update_module():
+    """更新 update_module 对应的业务数据，保持现有调用约定。"""
     try:
         data = request.json
         module_id = data.get('id')

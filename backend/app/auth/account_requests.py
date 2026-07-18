@@ -1,3 +1,4 @@
+"""account requests 模块负责本文件相关的业务流程、数据转换与依赖协作。"""
 import secrets
 from datetime import datetime, timedelta, timezone
 
@@ -10,22 +11,28 @@ CHINA_TIMEZONE = timezone(timedelta(hours=8))
 
 
 class AccountRequestError(RuntimeError):
+    """AccountRequestError 类封装该领域对象的状态、依赖与相关行为。"""
     pass
 
 
 class MockAccountRequestProvider:
+    """MockAccountRequestProvider 类封装该领域对象的状态、依赖与相关行为。"""
     def send(self, payload):
+        """处理 send 对应的业务步骤，并向调用方返回所需结果。"""
         return {"message_id": f"mock-{payload['request_id']}"}
 
 
 class HttpAccountRequestProvider:
+    """HttpAccountRequestProvider 类封装该领域对象的状态、依赖与相关行为。"""
     def __init__(self, url, token="", timeout=10, session=None):
+        """初始化当前对象的依赖、界面状态或运行参数。"""
         self.url = str(url or "").strip()
         self.token = str(token or "").strip()
         self.timeout = float(timeout)
         self.session = session or httpx.Client()
 
     def send(self, payload):
+        """处理 send 对应的业务步骤，并向调用方返回所需结果。"""
         if not self.url:
             raise AccountRequestError("账号申请失败，请联系管理员")
         headers = {"Content-Type": "application/json"}
@@ -46,10 +53,13 @@ class HttpAccountRequestProvider:
 
 
 class AccountRequestService:
+    """AccountRequestService 类封装该领域对象的状态、依赖与相关行为。"""
     def __init__(self, provider):
+        """初始化当前对象的依赖、界面状态或运行参数。"""
         self.provider = provider
 
     def submit(self, username, password, applicant_name):
+        """提交 submit 对应的业务数据，保持现有调用约定。"""
         username = normalize_username(username)
         password = str(password or "")
         applicant_name = str(applicant_name or "").strip()
@@ -84,6 +94,7 @@ class AccountRequestService:
 
 
 def build_account_request_service(config):
+    """构建并返回 build_account_request_service 对应的业务数据，保持现有调用约定。"""
     provider_name = str(config.get("ACCOUNT_REQUEST_PROVIDER", "mock")).strip().lower()
     if provider_name == "mock":
         provider = MockAccountRequestProvider()

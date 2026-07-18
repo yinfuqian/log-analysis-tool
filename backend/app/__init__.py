@@ -1,3 +1,4 @@
+"""  init   模块负责本文件相关的业务流程、数据转换与依赖协作。"""
 import logging
 import os
 
@@ -22,6 +23,7 @@ from extensions import db, migrate, init_redis, init_celery
 
 
 def create_app(config_overrides=None, redis_client=None):
+    """创建并返回 create_app 对应的业务数据，保持现有调用约定。"""
     app = Flask(__name__)
     CORS(app)
     app.config.from_object(Config)
@@ -67,6 +69,7 @@ def create_app(config_overrides=None, redis_client=None):
 
 
 def setup_logging(app):
+    """注册或配置 setup_logging 对应的业务数据，保持现有调用约定。"""
     log_dir = app.config["LOG_DIR"]
     if not os.path.exists(log_dir):
         os.makedirs(log_dir)

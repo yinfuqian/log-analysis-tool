@@ -25,7 +25,7 @@ exe = EXE(
     a.scripts,
     [],
     exclude_binaries=True,
-    name="LogAnalyzerClient",
+    name="FaultAnalyzerClient",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -45,17 +45,17 @@ coll = COLLECT(
     strip=False,
     upx=True,
     upx_exclude=[],
-    name="LogAnalyzerClient",
+    name="FaultAnalyzerClient",
 )
 
 app = BUNDLE(
     coll,
-    name="LogAnalyzerClient.app",
+    name="FaultAnalyzerClient.app",
     icon=None,
     bundle_identifier="com.wezhuiyi.loganalyzerclient",
     info_plist={
-        "CFBundleName": "LogAnalyzerClient",
-        "CFBundleDisplayName": "\u65e5\u5fd7\u5206\u6790\u5ba2\u6237\u7aef",
+        "CFBundleName": "FaultAnalyzerClient",
+        "CFBundleDisplayName": "故障分析工具客户端",
         "CFBundleShortVersionString": bundle_version,
         "CFBundleVersion": bundle_version,
         "NSHighResolutionCapable": True,

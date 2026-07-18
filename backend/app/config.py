@@ -1,9 +1,11 @@
+"""config 模块负责本文件相关的业务流程、数据转换与依赖协作。"""
 import os
 from pathlib import Path
 from urllib.parse import quote_plus
 
 
 def load_dotenv_file(path, override=False):
+    """读取并返回 load_dotenv_file 对应的业务数据，保持现有调用约定。"""
     env_path = Path(path)
     if not env_path.exists():
         return
@@ -29,6 +31,7 @@ def load_dotenv_file(path, override=False):
 
 
 def load_local_env():
+    """读取并返回 load_local_env 对应的业务数据，保持现有调用约定。"""
     backend_dir = Path(__file__).resolve().parents[1]
     project_root = backend_dir.parent
     for env_file in (project_root / ".env", backend_dir / ".env"):
@@ -39,6 +42,7 @@ load_local_env()
 
 
 def _build_mysql_uri():
+    """构建并返回 _build_mysql_uri 对应的业务数据，保持现有调用约定。"""
     username = os.getenv("MYSQL_USERNAME", "root")
     password = os.getenv("MYSQL_PASSWORD", "")
     host = os.getenv("MYSQL_HOST", "localhost")
@@ -51,6 +55,7 @@ def _build_mysql_uri():
 
 
 def _build_redis_url():
+    """构建并返回 _build_redis_url 对应的业务数据，保持现有调用约定。"""
     username = os.getenv("REDIS_USERNAME", "")
     password = os.getenv("REDIS_PASSWORD", "")
     host = os.getenv("REDIS_HOST", "localhost")
@@ -64,12 +69,26 @@ def _build_redis_url():
         auth = ""
     return f"redis://{auth}{host}:{port}/{database}"
 
+
+def _resolve_auth_users_file():
+    """解析并返回 _resolve_auth_users_file 对应的业务数据，保持现有调用约定。"""
+    backend_dir = Path(__file__).resolve().parents[1]
+    configured_path = os.getenv("AUTH_USERS_FILE")
+    if not configured_path:
+        return str(backend_dir.parent / "users.csv")
+    users_path = Path(configured_path).expanduser()
+    if users_path.is_absolute():
+        return configured_path
+    return str((backend_dir / users_path).resolve())
+
 class Config:
+    """Config 类封装该领域对象的状态、依赖与相关行为。"""
     MAX_CONTENT_LENGTH = int(os.getenv("MAX_CONTENT_LENGTH", str(120 * 1024 * 1024)))
     MAX_LOG_BYTES = int(os.getenv("MAX_LOG_BYTES", str(100 * 1024 * 1024)))
     MAX_IMAGE_BYTES = int(os.getenv("MAX_IMAGE_BYTES", str(10 * 1024 * 1024)))
     MAX_IMAGE_COUNT = int(os.getenv("MAX_IMAGE_COUNT", "10"))
     MAX_IMAGE_PIXELS = int(os.getenv("MAX_IMAGE_PIXELS", "40000000"))
+
     # 存储类型: 'local'（本地存储） | 'minio'（MinIO） | 'nas'（NAS）
     STORAGE_TYPE = os.getenv("STORAGE_TYPE", "local")
 
@@ -120,7 +139,7 @@ class Config:
     CELERY_BROKER_SOCKET_TIMEOUT = int(os.getenv("CELERY_BROKER_SOCKET_TIMEOUT", "360"))
 
     # Authentication configuration
-    AUTH_USERS_FILE = os.getenv("AUTH_USERS_FILE", "/data/users.csv")
+    AUTH_USERS_FILE = _resolve_auth_users_file()
     AUTH_LOGIN_MAX_FAILURES = int(os.getenv("AUTH_LOGIN_MAX_FAILURES", "5"))
     AUTH_LOGIN_WINDOW_SECONDS = int(os.getenv("AUTH_LOGIN_WINDOW_SECONDS", "300"))
     ACCOUNT_REQUEST_PROVIDER = os.getenv("ACCOUNT_REQUEST_PROVIDER", "mock")
@@ -140,11 +159,12 @@ class Config:
     GITLAB_DB_MAX_RETRIES = int(os.getenv("GITLAB_DB_MAX_RETRIES", "2"))
     GITLAB_SYNC_SKIP_EXISTING_REPOS = os.getenv("GITLAB_SYNC_SKIP_EXISTING_REPOS", "true").lower() == "true"
 
-    ## openai信息
+    # AI 模型与深度推理配置。所有文本和图片分析共用这一组参数。
     OPENAI_KEY = os.getenv("OPENAI_KEY", "")
     OPENAI_URL = os.getenv("OPENAI_URL", "https://api.deepseek.com")
-    OPENAI_MODEL = os.getenv("OPENAI_MODEL", "deepseek-chat")
+    OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5.6-sol")
     OPENAI_API_STYLE = os.getenv("OPENAI_API_STYLE", "chat").lower()
+    OPENAI_REASONING_EFFORT = os.getenv("OPENAI_REASONING_EFFORT", "high")
     LOG_ERROR_CONTEXT_LINES = int(os.getenv("LOG_ERROR_CONTEXT_LINES", "10"))
     LOG_CONTEXT_MAX_CHARS = int(os.getenv("LOG_CONTEXT_MAX_CHARS", "30000"))
     
@@ -156,7 +176,7 @@ class Config:
     ]
     
     ## 支持的文件类型
-    SUPPORTED_LANGUAGES = ['.java']  # 支持的文件类型（根据需求调整）
+    SUPPORTED_LANGUAGES = ['.java', '.py', '.go', '.sh', '.bash', '.zsh']  # Java / Python / Go / Shell
 
 
     ## 异步配置

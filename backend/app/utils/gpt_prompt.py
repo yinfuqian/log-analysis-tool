@@ -1,3 +1,4 @@
+"""gpt prompt 模块负责本文件相关的业务流程、数据转换与依赖协作。"""
 
 def build_gpt_prompt(log_content, code_snippets=None):
     """

@@ -1,3 +1,4 @@
+"""gitlab sync 模块负责本文件相关的业务流程、数据转换与依赖协作。"""
 import base64
 import json
 import time
@@ -17,12 +18,15 @@ from extensions import db
 
 
 class GitLabSyncError(RuntimeError):
+    """GitLabSyncError 类封装该领域对象的状态、依赖与相关行为。"""
     def __init__(self, message, status_code=None):
+        """初始化当前对象的依赖、界面状态或运行参数。"""
         super().__init__(message)
         self.status_code = status_code
 
 
 def normalize_gitlab_project(project):
+    """规范化并返回 normalize_gitlab_project 对应的业务数据，保持现有调用约定。"""
     path_with_namespace = project.get("path_with_namespace") or project.get("path") or project.get("name")
     parts = [part for part in path_with_namespace.split("/") if part]
     product_name = parts[0] if parts else project.get("namespace", {}).get("name") or "default"
@@ -42,6 +46,7 @@ def normalize_gitlab_project(project):
 
 
 def build_gitlab_project_query(page, membership_only=False):
+    """构建并返回 build_gitlab_project_query 对应的业务数据，保持现有调用约定。"""
     params = {
         "simple": "true",
         "per_page": 100,
@@ -64,6 +69,7 @@ def fetch_gitlab_projects(
     max_retries=3,
     retry_delay=1,
 ):
+    """读取并返回 fetch_gitlab_projects 对应的业务数据，保持现有调用约定。"""
     api_url = urljoin(base_url.rstrip("/") + "/", "api/v4/projects")
     page = 1
     projects = []
@@ -99,6 +105,7 @@ def fetch_gitlab_projects(
 
 
 def _get_json_with_retry(api_url, params, headers, timeout, max_retries, retry_delay):
+    """读取并返回 _get_json_with_retry 对应的业务数据，保持现有调用约定。"""
     attempt = 0
     while True:
         attempt += 1
@@ -114,6 +121,7 @@ def _get_json_with_retry(api_url, params, headers, timeout, max_retries, retry_d
 
 
 def _get_json(api_url, params, headers, timeout):
+    """读取并返回 _get_json 对应的业务数据，保持现有调用约定。"""
     url = f"{api_url}?{urlencode(params)}"
     request = Request(url, headers=headers)
     try:
@@ -127,6 +135,7 @@ def _get_json(api_url, params, headers, timeout):
 
 
 def sync_gitlab_projects(projects, db_max_retries=2):
+    """更新 sync_gitlab_projects 对应的业务数据，保持现有调用约定。"""
     stats = {
         "scanned_projects": 0,
         "synced_projects": 0,
@@ -153,6 +162,7 @@ def sync_gitlab_projects(projects, db_max_retries=2):
 
 
 def _sync_project_with_retry(item, db_max_retries):
+    """更新 _sync_project_with_retry 对应的业务数据，保持现有调用约定。"""
     attempt = 0
     while True:
         attempt += 1
@@ -168,6 +178,7 @@ def _sync_project_with_retry(item, db_max_retries):
 
 
 def _sync_normalized_project(item):
+    """更新 _sync_normalized_project 对应的业务数据，保持现有调用约定。"""
     stats = {
         "synced_projects": 0,
         "created_products": 0,
@@ -197,6 +208,7 @@ def _sync_normalized_project(item):
 
 
 def _dispose_current_engine():
+    """处理 _dispose_current_engine 对应的业务步骤，并向调用方返回所需结果。"""
     try:
         bind = db.session.get_bind()
         if hasattr(bind, "dispose"):
@@ -206,6 +218,7 @@ def _dispose_current_engine():
 
 
 def sync_gitlab_projects_from_config(config):
+    """更新 sync_gitlab_projects_from_config 对应的业务数据，保持现有调用约定。"""
     projects = fetch_gitlab_projects(
         config["GIT_BASE_URL"],
         username=config.get("GIT_USER"),
@@ -228,6 +241,7 @@ def sync_gitlab_projects_from_config(config):
 
 
 def filter_projects_missing_repositories(projects):
+    """处理 filter_projects_missing_repositories 对应的业务步骤，并向调用方返回所需结果。"""
     repo_urls = [project.get("http_url_to_repo") for project in projects if project.get("http_url_to_repo")]
     if not repo_urls:
         return projects, 0
@@ -243,6 +257,7 @@ def filter_projects_missing_repositories(projects):
 
 
 def _get_or_create_product(name):
+    """读取并返回 _get_or_create_product 对应的业务数据，保持现有调用约定。"""
     product = Product.query.filter_by(name=name).first()
     if product:
         return product, False
@@ -254,6 +269,7 @@ def _get_or_create_product(name):
 
 
 def _get_or_create_module_for_product(product_id, name):
+    """读取并返回 _get_or_create_module_for_product 对应的业务数据，保持现有调用约定。"""
     module = (
         db.session.query(Module)
         .join(ProductModule, ProductModule.module_id == Module.id)
@@ -270,6 +286,7 @@ def _get_or_create_module_for_product(product_id, name):
 
 
 def _get_or_create_branch(repo_url, default_branch):
+    """读取并返回 _get_or_create_branch 对应的业务数据，保持现有调用约定。"""
     branch = Branch.query.filter_by(address=repo_url).first()
     if branch:
         if default_branch and not branch.tag_version:
@@ -283,6 +300,7 @@ def _get_or_create_branch(repo_url, default_branch):
 
 
 def _ensure_product_module(product_id, module_id):
+    """校验 _ensure_product_module 对应的业务数据，保持现有调用约定。"""
     relation = ProductModule.query.filter_by(product_id=product_id, module_id=module_id).first()
     if relation:
         return False
@@ -293,6 +311,7 @@ def _ensure_product_module(product_id, module_id):
 
 
 def _ensure_module_branch(module_id, branch_id):
+    """校验 _ensure_module_branch 对应的业务数据，保持现有调用约定。"""
     relation = ModuleBranch.query.filter_by(module_id=module_id, branch_id=branch_id).first()
     if relation:
         return False

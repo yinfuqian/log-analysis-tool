@@ -1,3 +1,4 @@
+"""routes 模块负责本文件相关的业务流程、数据转换与依赖协作。"""
 from flask import Blueprint, current_app, g, jsonify, request
 
 from .account_requests import AccountRequestError
@@ -7,10 +8,12 @@ auth_bp = Blueprint("auth", __name__)
 
 
 def _sessions():
+    """处理 _sessions 对应的业务步骤，并向调用方返回所需结果。"""
     return current_app.extensions["auth_sessions"]
 
 
 def _invalid_credentials(status_code=401):
+    """处理 _invalid_credentials 对应的业务步骤，并向调用方返回所需结果。"""
     return jsonify({
         "code": "invalid_credentials",
         "message": "用户名或密码错误",
@@ -19,6 +22,7 @@ def _invalid_credentials(status_code=401):
 
 @auth_bp.post("/login")
 def login():
+    """处理 login 对应的业务步骤，并向调用方返回所需结果。"""
     payload = request.get_json(silent=True) or {}
     username = payload.get("username")
     password = payload.get("password")
@@ -41,6 +45,7 @@ def login():
 
 @auth_bp.post("/account-requests")
 def request_account():
+    """提交 request_account 对应的业务数据，保持现有调用约定。"""
     payload = request.get_json(silent=True) or {}
     service = current_app.extensions["account_request_service"]
     try:
@@ -58,10 +63,12 @@ def request_account():
 
 @auth_bp.post("/logout")
 def logout():
+    """处理 logout 对应的业务步骤，并向调用方返回所需结果。"""
     _sessions().revoke(g.auth_token)
     return jsonify({"message": "已退出登录"})
 
 
 @auth_bp.get("/me")
 def me():
+    """处理 me 对应的业务步骤，并向调用方返回所需结果。"""
     return jsonify({"username": g.current_user.username})

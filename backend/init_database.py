@@ -1,3 +1,4 @@
+"""init database 模块负责本文件相关的业务流程、数据转换与依赖协作。"""
 from sqlalchemy.engine.url import make_url
 import pymysql
 
@@ -5,6 +6,7 @@ from app.config import Config
 
 
 def create_database_if_missing():
+    """创建并返回 create_database_if_missing 对应的业务数据，保持现有调用约定。"""
     url = make_url(Config.SQLALCHEMY_DATABASE_URI)
     database = url.database
     if not database:

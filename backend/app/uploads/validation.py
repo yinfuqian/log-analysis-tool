@@ -1,3 +1,4 @@
+"""validation 模块负责本文件相关的业务流程、数据转换与依赖协作。"""
 import io
 from pathlib import Path
 
@@ -12,12 +13,15 @@ IMAGE_FORMATS_BY_EXTENSION = {
 
 
 class UploadValidationError(ValueError):
+    """UploadValidationError 类封装该领域对象的状态、依赖与相关行为。"""
     def __init__(self, message, status_code=400):
+        """初始化当前对象的依赖、界面状态或运行参数。"""
         super().__init__(message)
         self.status_code = status_code
 
 
 def read_upload_bytes(stream, max_bytes, label="文件", chunk_size=1024 * 1024):
+    """读取并返回 read_upload_bytes 对应的业务数据，保持现有调用约定。"""
     try:
         stream.seek(0)
     except (AttributeError, OSError):
@@ -37,12 +41,14 @@ def read_upload_bytes(stream, max_bytes, label="文件", chunk_size=1024 * 1024)
 
 
 def validate_image_count(uploaded_files, max_count):
+    """校验 validate_image_count 对应的业务数据，保持现有调用约定。"""
     count = len(uploaded_files or [])
     if count > max_count:
         raise UploadValidationError(f"单次最多上传 {max_count} 张图片", status_code=413)
 
 
 def validate_image_upload(filename, stream, max_bytes=10 * 1024 * 1024, max_pixels=40_000_000):
+    """校验 validate_image_upload 对应的业务数据，保持现有调用约定。"""
     extension = Path(str(filename or "")).suffix.lower()
     expected_format = IMAGE_FORMATS_BY_EXTENSION.get(extension)
     if not expected_format:

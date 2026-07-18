@@ -1,8 +1,10 @@
 import unittest
+from unittest.mock import MagicMock, patch
 
 from flask import Flask, g, jsonify
 
-from app.audit.service import install_operation_audit
+from app.audit.models import UserOperationLog
+from app.audit.service import install_operation_audit, persist_operation_audit
 
 
 class OperationAuditTests(unittest.TestCase):
@@ -86,6 +88,33 @@ class OperationAuditTests(unittest.TestCase):
         response = app.test_client().get("/business")
 
         self.assertEqual(response.status_code, 200)
+
+    def test_default_writer_uses_an_independent_database_transaction(self):
+        """审计写入不能提交或回滚当前业务请求使用的 scoped session。"""
+        fake_db = MagicMock()
+        connection = fake_db.engine.begin.return_value.__enter__.return_value
+        row = {
+            "request_id": "REQ-INDEPENDENT",
+            "operator_username": "alice",
+            "actor_type": "authenticated",
+            "request_method": "GET",
+            "request_path": "/business",
+            "client_ip": "127.0.0.1",
+            "user_agent": "test",
+            "status_code": 200,
+            "duration_ms": 1,
+            "operation_result": "success",
+            "target_username": None,
+        }
+
+        with patch("app.audit.service.db", fake_db):
+            persist_operation_audit(row)
+
+        connection.execute.assert_called_once()
+        statement = connection.execute.call_args.args[0]
+        self.assertIs(statement.table, UserOperationLog.__table__)
+        fake_db.session.add.assert_not_called()
+        fake_db.session.commit.assert_not_called()
 
 
 if __name__ == "__main__":

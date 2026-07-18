@@ -3,6 +3,7 @@ import unittest
 import importlib.util
 import inspect
 from pathlib import Path
+from unittest.mock import patch
 
 import requests
 
@@ -12,6 +13,7 @@ if str(CLIENT_DIR) not in sys.path:
     sys.path.insert(0, str(CLIENT_DIR))
 
 from api_client import ApiClient
+from login_window import AccountRequestDialog, LoginWindow
 
 
 def load_main_module():
@@ -46,6 +48,176 @@ class FakeSession:
 
 
 class ApiClientAuthTests(unittest.TestCase):
+    def test_login_window_uses_fault_analysis_title(self):
+        source = inspect.getsource(LoginWindow.__init__)
+
+        self.assertIn("CLIENT_LOGIN_TITLE", source)
+        self.assertNotIn("日志分析客户端登录", source)
+
+    def test_login_window_height_keeps_login_and_account_request_buttons_visible(self):
+        geometries = []
+
+        class FakeToplevel:
+            def __init__(self, _root):
+                pass
+
+            def title(self, _value):
+                pass
+
+            def geometry(self, value):
+                geometries.append(value)
+
+            def resizable(self, _width, _height):
+                pass
+
+            def protocol(self, _name, _callback):
+                pass
+
+            def grab_set(self):
+                pass
+
+        class FakeVariable:
+            def __init__(self, value=""):
+                self.value = value
+
+        class FakeClient:
+            base_url = "http://backend"
+
+        with patch("login_window.tk.Toplevel", FakeToplevel), \
+                patch("login_window.tk.StringVar", FakeVariable), \
+                patch.object(LoginWindow, "_build_layout"):
+            LoginWindow(object(), FakeClient(), lambda _username: None, lambda: None)
+
+        self.assertEqual(geometries, ["420x430"])
+
+    def test_login_window_shows_invalid_password_error_and_reenables_button(self):
+        callbacks = []
+        shown_errors = []
+
+        class FakeVariable:
+            def __init__(self, value=""):
+                self.value = value
+
+            def get(self):
+                return self.value
+
+            def set(self, value):
+                self.value = value
+
+        class FakeButton:
+            def __init__(self):
+                self.state = None
+
+            def configure(self, **kwargs):
+                self.state = kwargs.get("state")
+
+        class FakeRoot:
+            def after(self, _delay, callback):
+                callbacks.append(callback)
+
+        class FakeClient:
+            base_url = "http://old-backend"
+
+            def set_base_url(self, value):
+                self.base_url = value
+
+            def login(self, _username, _password):
+                response = FakeResponse({"message": "用户名或密码错误"}, status_code=401)
+                raise requests.HTTPError("401 Error", response=response)
+
+        class ImmediateThread:
+            def __init__(self, target, daemon=None):
+                self.target = target
+
+            def start(self):
+                self.target()
+
+        window = object.__new__(LoginWindow)
+        window.root = FakeRoot()
+        window.window = object()
+        window.client = FakeClient()
+        window.backend_url = FakeVariable("http://127.0.0.1:5000")
+        window.username = FakeVariable("admin")
+        window.password = FakeVariable("wrong")
+        window.status = FakeVariable()
+        window.login_button = FakeButton()
+
+        with patch("login_window.threading.Thread", ImmediateThread), \
+                patch(
+                    "login_window.messagebox.showerror",
+                    side_effect=lambda _title, message, **_kwargs: shown_errors.append(message),
+                ):
+            window._submit()
+            self.assertEqual(len(callbacks), 1)
+            callbacks[0]()
+
+        self.assertEqual(window.status.get(), "用户名或密码错误")
+        self.assertEqual(window.password.get(), "")
+        self.assertEqual(window.login_button.state, "normal")
+        self.assertEqual(shown_errors, ["用户名或密码错误"])
+        self.assertEqual(window.client.base_url, "http://127.0.0.1:5000")
+
+    def test_account_request_error_reenables_button_instead_of_staying_stuck(self):
+        callbacks = []
+        shown_errors = []
+
+        class FakeVariable:
+            def __init__(self, value=""):
+                self.value = value
+
+            def get(self):
+                return self.value
+
+            def set(self, value):
+                self.value = value
+
+        class FakeButton:
+            def __init__(self):
+                self.state = None
+
+            def configure(self, **kwargs):
+                self.state = kwargs.get("state")
+
+        class FakeParent:
+            def after(self, _delay, callback):
+                callbacks.append(callback)
+
+        class FakeClient:
+            def request_account(self, _username, _password, _applicant_name):
+                response = FakeResponse({"error": "账号申请调用失败，请联系管理员"}, status_code=404)
+                raise requests.HTTPError("404 Error", response=response)
+
+        class ImmediateThread:
+            def __init__(self, target, daemon=None):
+                self.target = target
+
+            def start(self):
+                self.target()
+
+        dialog = object.__new__(AccountRequestDialog)
+        dialog.parent = FakeParent()
+        dialog.window = object()
+        dialog.client = FakeClient()
+        dialog.applicant_name = FakeVariable("申请人")
+        dialog.username = FakeVariable("new-user")
+        dialog.password = FakeVariable("request-password")
+        dialog.status = FakeVariable()
+        dialog.submit_button = FakeButton()
+
+        with patch("login_window.threading.Thread", ImmediateThread), \
+                patch(
+                    "login_window.messagebox.showerror",
+                    side_effect=lambda _title, message, **_kwargs: shown_errors.append(message),
+                ):
+            dialog._submit()
+            self.assertEqual(len(callbacks), 1)
+            callbacks[0]()
+
+        self.assertEqual(dialog.status.get(), "账号申请调用失败，请联系管理员")
+        self.assertEqual(dialog.password.get(), "")
+        self.assertEqual(dialog.submit_button.state, "normal")
+        self.assertEqual(shown_errors, ["账号申请调用失败，请联系管理员"])
+
     def test_login_keeps_token_only_in_memory_and_authorizes_later_requests(self):
         session = FakeSession([
             FakeResponse({"token": "session-token", "username": "alice"}),
@@ -59,6 +231,7 @@ class ApiClientAuthTests(unittest.TestCase):
         self.assertEqual(username, "alice")
         self.assertEqual(client.token, "session-token")
         self.assertNotIn("Authorization", session.requests[0][2].get("headers", {}))
+        self.assertEqual(session.requests[0][2]["timeout"], 10)
         self.assertEqual(
             session.requests[1][2]["headers"]["Authorization"],
             "Bearer session-token",
@@ -109,6 +282,7 @@ class ApiClientAuthTests(unittest.TestCase):
             "applicant_name": "张三",
         })
         self.assertNotIn("Authorization", kwargs.get("headers", {}))
+        self.assertEqual(kwargs["timeout"], 10)
 
     def test_log_analyzer_api_uses_authenticated_session_for_business_calls(self):
         module = load_main_module()

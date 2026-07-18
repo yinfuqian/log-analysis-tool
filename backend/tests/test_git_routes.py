@@ -184,6 +184,30 @@ class GitRoutesTests(unittest.TestCase):
                 self.assertEqual(payload["source"], "database")
                 run.assert_not_called()
 
+    def test_git_branches_cached_only_returns_empty_without_remote_call(self):
+        with patch.object(git_routes, "load_cached_refs", return_value=None):
+            with patch.object(git_routes.subprocess, "run") as run:
+                if "flask" in sys.modules and not hasattr(sys.modules["flask"], "g"):
+                    del sys.modules["flask"]
+                if "celery.result" in sys.modules and not hasattr(sys.modules["celery.result"], "GroupResult"):
+                    del sys.modules["celery.result"]
+                app = create_test_app()
+
+                response = app.test_client().get(
+                    "/git/branches",
+                    query_string={
+                        "repo_url": "https://code.in.wezhuiyi.com/group/repo.git",
+                        "cached_only": "1",
+                    },
+                )
+
+                self.assertEqual(response.status_code, 200)
+                payload = response.get_json()
+                self.assertEqual(payload["source"], "database")
+                self.assertFalse(payload["cached"])
+                self.assertEqual(payload["versions"], [])
+                run.assert_not_called()
+
     def test_git_branches_endpoint_refresh_bypasses_cached_refs(self):
         cached_refs = {
             "branches": ["old"],

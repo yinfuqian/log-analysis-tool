@@ -1,3 +1,4 @@
+"""routes 模块负责本文件相关的业务流程、数据转换与依赖协作。"""
 import datetime
 import logging
 import os
@@ -39,12 +40,14 @@ SUPPORTED_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg"}
 
 @dataclass
 class PreparedUpload:
+    """PreparedUpload 类封装该领域对象的状态、依赖与相关行为。"""
     output_filename: str
     lines_to_save: list[str]
     metadata: dict
 
 
 def build_upload_log_name(product_name, module_name, address, tag_version, original_filename):
+    """构建并返回 build_upload_log_name 对应的业务数据，保持现有调用约定。"""
     original_extension = os.path.splitext(original_filename)[1] or ".log"
     repo_name = os.path.splitext(os.path.basename((address or "repo").rstrip("/")))[0] or "repo"
     timestamp = datetime.datetime.utcnow().strftime("%Y%m%d%H%M%S%f")
@@ -56,15 +59,18 @@ def build_upload_log_name(product_name, module_name, address, tag_version, origi
 
 
 def build_upload_image_name(product_name, module_name, address, tag_version, original_filename):
+    """构建并返回 build_upload_image_name 对应的业务数据，保持现有调用约定。"""
     return build_upload_log_name(product_name, module_name, address, tag_version, original_filename)
 
 
 def is_supported_image_filename(filename):
+    """判断 is_supported_image_filename 对应的业务数据，保持现有调用约定。"""
     suffix = os.path.splitext(str(filename or ""))[1].lower()
     return suffix in SUPPORTED_IMAGE_EXTENSIONS
 
 
 def get_uploaded_image_files(files):
+    """读取并返回 get_uploaded_image_files 对应的业务数据，保持现有调用约定。"""
     uploaded_files = []
     if hasattr(files, "getlist"):
         uploaded_files = files.getlist("files") or files.getlist("file")
@@ -74,6 +80,7 @@ def get_uploaded_image_files(files):
 
 
 def prepare_uploaded_images(uploaded_files, product_name, module_name, address, tag_version):
+    """处理 prepare_uploaded_images 对应的业务步骤，并向调用方返回所需结果。"""
     config = getattr(app, "config", {})
     validate_image_count(uploaded_files, config.get("MAX_IMAGE_COUNT", 10))
     validated_images = []
@@ -117,6 +124,7 @@ def prepare_uploaded_images(uploaded_files, product_name, module_name, address, 
 
 
 def prepare_uploaded_log(uploaded_file, original_filename, log_name, date_filter=None):
+    """处理 prepare_uploaded_log 对应的业务步骤，并向调用方返回所需结果。"""
     config = getattr(app, "config", {})
     raw_lines = read_uploaded_log_lines(
         uploaded_file,
@@ -148,6 +156,7 @@ def prepare_uploaded_log(uploaded_file, original_filename, log_name, date_filter
 
 
 def _resolve_upload_scope(form_data):
+    """解析并返回 _resolve_upload_scope 对应的业务数据，保持现有调用约定。"""
     product_id = form_data.get("product_id")
     module_id = form_data.get("module_id")
     address = form_data.get("address")
@@ -156,10 +165,12 @@ def _resolve_upload_scope(form_data):
 
 
 def _validate_common_upload_fields(product_id, module_id, address, tag_version):
+    """校验 _validate_common_upload_fields 对应的业务数据，保持现有调用约定。"""
     return all([product_id, module_id, address, tag_version])
 
 
 def _resolve_domain_names(product_id, module_id, address, tag_version):
+    """解析并返回 _resolve_domain_names 对应的业务数据，保持现有调用约定。"""
     product_name = get_product_name_by_id(product_id)
     module_name = get_module_name_by_id(module_id)
     branch_address, branch_version = get_branch_address_by_name(address, tag_version)
@@ -168,6 +179,7 @@ def _resolve_domain_names(product_id, module_id, address, tag_version):
 
 @logfile_bp.route("/upload", methods=["POST"])
 def upload_log():
+    """上传 upload_log 对应的业务数据，保持现有调用约定。"""
     app.logger.debug("开始处理日志上传请求")
     if "file" not in request.files:
         app.logger.error("文件上传失败: 没有文件字段")
@@ -226,6 +238,7 @@ def upload_log():
 
 @logfile_bp.route("/upload_image", methods=["POST"])
 def upload_image():
+    """上传 upload_image 对应的业务数据，保持现有调用约定。"""
     app.logger.debug("\u5f00\u59cb\u5904\u7406\u56fe\u7247\u4e0a\u4f20\u8bf7\u6c42")
     uploaded_files = get_uploaded_image_files(request.files)
     if not uploaded_files:

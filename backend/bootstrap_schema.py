@@ -1,3 +1,4 @@
+"""bootstrap schema 模块负责本文件相关的业务流程、数据转换与依赖协作。"""
 from pathlib import Path
 import re
 
@@ -40,6 +41,28 @@ DDL_STATEMENTS = [
         PRIMARY KEY (id),
         UNIQUE KEY uq_git_refs_ref_key (ref_key),
         KEY ix_git_refs_repo_url (repo_url)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS user_operation_logs (
+        id INTEGER NOT NULL AUTO_INCREMENT,
+        request_id VARCHAR(64) NOT NULL,
+        operator_username VARCHAR(255),
+        actor_type VARCHAR(32) NOT NULL,
+        request_method VARCHAR(16) NOT NULL,
+        request_path VARCHAR(500) NOT NULL,
+        client_ip VARCHAR(64),
+        user_agent VARCHAR(500),
+        status_code INTEGER NOT NULL,
+        duration_ms INTEGER NOT NULL,
+        operation_result VARCHAR(32) NOT NULL,
+        target_username VARCHAR(255),
+        created_at DATETIME NOT NULL,
+        PRIMARY KEY (id),
+        UNIQUE KEY uq_user_operation_logs_request_id (request_id),
+        KEY ix_user_operation_logs_operator_username (operator_username),
+        KEY ix_user_operation_logs_request_path (request_path),
+        KEY ix_user_operation_logs_created_at (created_at)
     )
     """,
     """
@@ -143,6 +166,7 @@ DDL_STATEMENTS = [
 
 
 def current_revision():
+    """处理 current_revision 对应的业务步骤，并向调用方返回所需结果。"""
     versions_dir = Path(__file__).resolve().parent / "migrations" / "versions"
     revisions = {}
     down_revisions = set()
@@ -162,6 +186,7 @@ def current_revision():
 
 
 def connect():
+    """处理 connect 对应的业务步骤，并向调用方返回所需结果。"""
     url = make_url(Config.SQLALCHEMY_DATABASE_URI)
     return pymysql.connect(
         host=url.host or "localhost",
@@ -174,6 +199,7 @@ def connect():
 
 
 def table_exists(cursor, table_name):
+    """处理 table_exists 对应的业务步骤，并向调用方返回所需结果。"""
     cursor.execute(
         """
         SELECT COUNT(*)
@@ -186,6 +212,7 @@ def table_exists(cursor, table_name):
 
 
 def column_exists(cursor, table_name, column_name):
+    """处理 column_exists 对应的业务步骤，并向调用方返回所需结果。"""
     cursor.execute(
         """
         SELECT COUNT(*)
@@ -198,6 +225,7 @@ def column_exists(cursor, table_name, column_name):
 
 
 def index_exists(cursor, table_name, index_name):
+    """处理 index_exists 对应的业务步骤，并向调用方返回所需结果。"""
     cursor.execute(
         """
         SELECT COUNT(*)
@@ -210,6 +238,7 @@ def index_exists(cursor, table_name, index_name):
 
 
 def foreign_key_exists(cursor, table_name, constraint_name):
+    """处理 foreign_key_exists 对应的业务步骤，并向调用方返回所需结果。"""
     cursor.execute(
         """
         SELECT COUNT(*)
@@ -225,16 +254,19 @@ def foreign_key_exists(cursor, table_name, constraint_name):
 
 
 def add_column_if_missing(cursor, table_name, column_name, definition):
+    """处理 add_column_if_missing 对应的业务步骤，并向调用方返回所需结果。"""
     if not column_exists(cursor, table_name, column_name):
         cursor.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {definition}")
 
 
 def add_index_if_missing(cursor, table_name, index_name, column_name):
+    """处理 add_index_if_missing 对应的业务步骤，并向调用方返回所需结果。"""
     if not index_exists(cursor, table_name, index_name):
         cursor.execute(f"CREATE INDEX {index_name} ON {table_name} ({column_name})")
 
 
 def drop_foreign_keys(cursor, table_name, column_name, referenced_table=None):
+    """处理 drop_foreign_keys 对应的业务步骤，并向调用方返回所需结果。"""
     params = [table_name, column_name]
     referenced_filter = ""
     if referenced_table:
@@ -257,6 +289,7 @@ def drop_foreign_keys(cursor, table_name, column_name, referenced_table=None):
 
 
 def has_invalid_reference(cursor, table_name, column_name, referenced_table, referenced_column="id"):
+    """判断 has_invalid_reference 对应的业务数据，保持现有调用约定。"""
     cursor.execute(
         f"""
         SELECT COUNT(*)
@@ -271,6 +304,7 @@ def has_invalid_reference(cursor, table_name, column_name, referenced_table, ref
 
 
 def add_foreign_key_if_safe(cursor, table_name, constraint_name, column_name, referenced_table):
+    """处理 add_foreign_key_if_safe 对应的业务步骤，并向调用方返回所需结果。"""
     if foreign_key_exists(cursor, table_name, constraint_name):
         return
     if has_invalid_reference(cursor, table_name, column_name, referenced_table):
@@ -289,6 +323,7 @@ def add_foreign_key_if_safe(cursor, table_name, constraint_name, column_name, re
 
 
 def ensure_query_records_schema(cursor):
+    """校验 ensure_query_records_schema 对应的业务数据，保持现有调用约定。"""
     if not table_exists(cursor, "query_records"):
         return
 
@@ -317,6 +352,7 @@ def ensure_query_records_schema(cursor):
 
 
 def bootstrap_schema():
+    """处理 bootstrap_schema 对应的业务步骤，并向调用方返回所需结果。"""
     revision = current_revision()
     connection = connect()
     try:

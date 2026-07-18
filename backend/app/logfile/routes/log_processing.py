@@ -1,3 +1,4 @@
+"""log processing 模块负责本文件相关的业务流程、数据转换与依赖协作。"""
 import gzip
 import re
 from dataclasses import dataclass
@@ -7,11 +8,13 @@ from app.uploads.validation import read_upload_bytes
 
 
 class LogProcessingError(ValueError):
+    """LogProcessingError 类封装该领域对象的状态、依赖与相关行为。"""
     pass
 
 
 @dataclass
 class DateFilterResult:
+    """DateFilterResult 类封装该领域对象的状态、依赖与相关行为。"""
     filtered_lines: list[str]
     date_filter_applied: bool
     target_date: date | None
@@ -29,6 +32,7 @@ TIMESTAMP_PATTERNS = [
 
 
 def read_uploaded_log_lines(uploaded_file, filename: str, max_bytes=None) -> list[str]:
+    """读取并返回 read_uploaded_log_lines 对应的业务数据，保持现有调用约定。"""
     raw_content = _read_uploaded_bytes(uploaded_file, max_bytes=max_bytes)
     if filename.lower().endswith(".gz"):
         try:
@@ -40,6 +44,7 @@ def read_uploaded_log_lines(uploaded_file, filename: str, max_bytes=None) -> lis
 
 
 def resolve_target_date(date_filter: str | None, today: date | None = None) -> date | None:
+    """解析并返回 resolve_target_date 对应的业务数据，保持现有调用约定。"""
     if date_filter is None or not str(date_filter).strip():
         return None
 
@@ -56,6 +61,7 @@ def resolve_target_date(date_filter: str | None, today: date | None = None) -> d
 
 
 def extract_log_date(line: str) -> date | None:
+    """解析或提取并返回 extract_log_date 对应的业务数据，保持现有调用约定。"""
     for pattern in TIMESTAMP_PATTERNS:
         match = pattern.search(line)
         if not match:
@@ -72,6 +78,7 @@ def extract_log_date(line: str) -> date | None:
 
 
 def filter_lines_by_date(lines: list[str], target_date: date | None) -> DateFilterResult:
+    """处理 filter_lines_by_date 对应的业务步骤，并向调用方返回所需结果。"""
     normalized_lines = [line.rstrip("\r\n") for line in lines]
     original_line_count = len(normalized_lines)
 
@@ -128,6 +135,7 @@ def filter_lines_by_date(lines: list[str], target_date: date | None) -> DateFilt
 
 
 def _read_uploaded_bytes(uploaded_file, max_bytes=None) -> bytes:
+    """读取并返回 _read_uploaded_bytes 对应的业务数据，保持现有调用约定。"""
     stream = getattr(uploaded_file, "stream", None)
     if stream is not None:
         if max_bytes is not None:
@@ -148,6 +156,7 @@ def _read_uploaded_bytes(uploaded_file, max_bytes=None) -> bytes:
 
 
 def _decode_log_bytes(raw_content: bytes) -> str:
+    """解析或提取并返回 _decode_log_bytes 对应的业务数据，保持现有调用约定。"""
     for encoding in ("utf-8-sig", "utf-8", "gb18030"):
         try:
             return raw_content.decode(encoding)

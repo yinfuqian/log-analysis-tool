@@ -1,7 +1,12 @@
 import importlib.util
+import inspect
+import json
 import re
+import subprocess
 import sys
 import tempfile
+import threading
+import time
 import types
 import unittest
 from pathlib import Path
@@ -10,6 +15,7 @@ from pathlib import Path
 BACKEND_DIR = Path(__file__).resolve().parents[1]
 ROUTES_DIR = BACKEND_DIR / "app" / "analysis" / "routes"
 ROUTES_PATH = ROUTES_DIR / "routes.py"
+AI_OPTIONS_PATH = BACKEND_DIR / "app" / "ai_options.py"
 
 
 class BlueprintStub:
@@ -34,6 +40,18 @@ class FakeAnalyzeTask:
         return FakeTaskResult()
 
 
+class FakeAiResponse:
+    status_code = 429
+
+    def json(self):
+        return {
+            "error": {
+                "message": "The usage limit has been reached",
+                "type": "usage_limit_reached",
+            }
+        }
+
+
 class FakeAsyncResult:
     info = {}
 
@@ -51,6 +69,11 @@ class FakeAsyncResult:
 
 
 def install_route_stubs():
+    ai_options_spec = importlib.util.spec_from_file_location("app.ai_options", AI_OPTIONS_PATH)
+    ai_options_module = importlib.util.module_from_spec(ai_options_spec)
+    sys.modules["app.ai_options"] = ai_options_module
+    ai_options_spec.loader.exec_module(ai_options_module)
+
     class FakeChatCompletions:
         def __init__(self):
             self.calls = []
@@ -133,7 +156,13 @@ def install_route_stubs():
     logfile_model_stub = types.ModuleType("app.logfile.models.model")
     logfile_model_stub.QueryRecord = lambda **kwargs: kwargs
     logfile_model_stub.AnalysisKnowledgeCase = types.SimpleNamespace
+    logfile_model_stub.Log = types.SimpleNamespace
     sys.modules["app.logfile.models.model"] = logfile_model_stub
+
+    upload_references_stub = types.ModuleType("app.uploads.references")
+    upload_references_stub.AnalysisInputError = ValueError
+    upload_references_stub.resolve_analysis_inputs = lambda data, upload_root, lookup: [data.get("file_path")]
+    sys.modules["app.uploads.references"] = upload_references_stub
 
     tasks_stub = types.ModuleType("app.analysis.routes.tasks")
     tasks_stub.analyze_log_task = FakeAnalyzeTask()
@@ -151,6 +180,216 @@ def load_routes_module():
 
 
 class AsyncAnalysisRouteTests(unittest.TestCase):
+    def test_clone_git_repo_reports_sanitized_git_stderr(self):
+        routes, flask_stub, _, _, _ = load_routes_module()
+        flask_stub.current_app.config = {
+            "GIT_USER": "tester",
+            "GIT_PASSWORD": "top-secret",
+        }
+        original_run = routes.subprocess.run
+
+        def fail_clone(*args, **kwargs):
+            raise subprocess.CalledProcessError(
+                128,
+                args[0],
+                stderr=b"fatal: Remote branch release-missing not found in upstream origin",
+            )
+
+        routes.subprocess.run = fail_clone
+        try:
+            with self.assertRaises(routes.GitCloneError) as raised:
+                routes.clone_git_repo(
+                    "https://git.example/team/repo.git",
+                    "release-missing",
+                    workspace_id="task-test",
+                )
+        finally:
+            routes.subprocess.run = original_run
+
+        message = str(raised.exception)
+        self.assertIn("release-missing", message)
+        self.assertIn("不存在", message)
+        self.assertNotIn("top-secret", message)
+
+    def test_primary_clone_failure_is_not_swallowed(self):
+        routes, _, _, _, _ = load_routes_module()
+        repositories = [{
+            "role": "primary",
+            "moduleName": "primary-repo",
+            "branchAddress": "https://git.example/primary.git",
+            "tagVersion": "missing",
+            "workspaceId": "task",
+        }]
+
+        def fail_clone(*args, **kwargs):
+            raise routes.GitCloneError("primary-repo 分支 missing 不存在")
+
+        with self.assertRaises(routes.GitCloneError):
+            routes.clone_analysis_repositories(repositories, fail_clone, max_workers=1)
+
+    def test_image_chain_discovery_uses_metadata_without_ai(self):
+        routes, _, _, _, _ = load_routes_module()
+        source = inspect.getsource(routes.build_chain_relevance_input)
+
+        self.assertNotIn("analyze_uploaded_image", source)
+        result = routes.build_chain_relevance_input({
+            "source_type": "image",
+            "file_paths": ["/tmp/callback-timeout.png", "/tmp/http-500.png"],
+            "image_tag": "downstream callback",
+            "image_description": "HTTP 500 response timeout",
+        })
+
+        self.assertIn("downstream callback", result)
+        self.assertIn("HTTP 500 response timeout", result)
+        self.assertIn("callback-timeout.png", result)
+
+    def test_image_chain_context_includes_local_ocr_text(self):
+        routes, _, _, _, _ = load_routes_module()
+
+        def fake_ocr(paths):
+            self.assertEqual(paths, ["/tmp/error.png"])
+            return {
+                "available": True,
+                "engine": "paddleocr",
+                "extracted_text": (
+                    "2026-07-14 ERROR request failed\n"
+                    "url=http://see-management-svc:9008/see-management/facade/prompt/get"
+                ),
+                "lines": [],
+                "average_confidence": 0.96,
+                "warnings": [],
+            }
+
+        source_text, ocr_result = routes.build_chain_relevance_context(
+            {
+                "source_type": "image",
+                "file_path": "/tmp/error.png",
+                "image_tag": "log_image",
+                "image_description": "调用失败截图",
+            },
+            ocr_extractor=fake_ocr,
+        )
+
+        self.assertIn("see-management-svc", source_text)
+        self.assertIn("调用失败截图", source_text)
+        self.assertEqual(ocr_result["engine"], "paddleocr")
+
+    def test_discovery_response_returns_image_ocr_for_task_reuse(self):
+        routes, flask_stub, _, _, _ = load_routes_module()
+        flask_stub.request.json = {
+            "productId": "46",
+            "moduleId": "256",
+            "branchAddress": "https://git.example/see-task.git",
+            "tagVersion": "v1",
+            "file_path": "/tmp/error.png",
+            "source_type": "image",
+            "image_tag": "log_image",
+        }
+        expected_ocr = {
+            "available": True,
+            "engine": "paddleocr",
+            "extracted_text": "ERROR callback http://see-management-svc/api failed",
+            "lines": [],
+            "average_confidence": 0.95,
+            "warnings": [],
+        }
+        original_context_builder = routes.build_chain_relevance_context
+        original_modules_loader = routes.get_available_modules_for_product
+        routes.build_chain_relevance_context = lambda data: (
+            expected_ocr["extracted_text"],
+            expected_ocr,
+        )
+        routes.get_available_modules_for_product = lambda product_id: []
+        try:
+            payload = routes.discover_related_modules_route()
+        finally:
+            routes.build_chain_relevance_context = original_context_builder
+            routes.get_available_modules_for_product = original_modules_loader
+
+        self.assertTrue(payload["requiresRelatedEvidence"])
+        self.assertEqual(payload["imageOcr"], expected_ocr)
+
+    def test_image_discovery_reports_ocr_unavailable_instead_of_no_chain(self):
+        routes, flask_stub, _, _, _ = load_routes_module()
+        flask_stub.request.json = {
+            "productId": "46",
+            "moduleId": "256",
+            "branchAddress": "https://git.example/see-task.git",
+            "tagVersion": "v1",
+            "file_path": "/tmp/error.png",
+            "source_type": "image",
+            "image_tag": "log_image",
+        }
+        unavailable_ocr = {
+            "available": False,
+            "engine": "paddleocr",
+            "extracted_text": "",
+            "lines": [],
+            "average_confidence": 0.0,
+            "warnings": ["No module named 'paddleocr'"],
+        }
+        original_context_builder = routes.build_chain_relevance_context
+        routes.build_chain_relevance_context = lambda data: ("log_image", unavailable_ocr)
+        try:
+            payload = routes.discover_related_modules_route()
+        finally:
+            routes.build_chain_relevance_context = original_context_builder
+
+        self.assertEqual(payload["status"], "image_ocr_unavailable")
+        self.assertFalse(payload["chainAssessmentComplete"])
+        self.assertNotIn("不涉及上下游", payload["message"])
+        self.assertEqual(payload["imageOcr"], unavailable_ocr)
+
+    def test_sync_analysis_uses_backend_summary_instead_of_preliminary_ai(self):
+        routes, _, _, _, _ = load_routes_module()
+        source = inspect.getsource(routes.analyze_log_and_code)
+
+        self.assertNotIn("analyze_log_with_deepseek", source)
+        self.assertIn("build_backend_log_analysis", source)
+
+    def test_final_image_analysis_uses_one_multimodal_request(self):
+        routes, flask_stub, _, _, fake_openai = load_routes_module()
+        flask_stub.current_app.config = {
+            "OPENAI_KEY": "token",
+            "OPENAI_URL": "https://example.invalid/v1",
+            "OPENAI_MODEL": "gpt-test",
+            "OPENAI_API_STYLE": "chat",
+        }
+        with tempfile.TemporaryDirectory() as temp_dir:
+            image_path = Path(temp_dir) / "error.png"
+            image_path.write_bytes(b"fake-png")
+
+            result = routes.analyze_code_with_deepseek(
+                "image_tag=log_image",
+                "backend image metadata",
+                [],
+                image_paths=[str(image_path)],
+            )
+
+        self.assertEqual(result, "chat-result")
+        self.assertEqual(len(fake_openai.last_instance.chat.completions.calls), 1)
+        content = fake_openai.last_instance.chat.completions.calls[0]["messages"][1]["content"]
+        self.assertTrue(any(item.get("type") == "image_url" for item in content))
+
+    def test_final_text_prompt_includes_grouped_backend_summary_once(self):
+        routes, flask_stub, _, _, fake_openai = load_routes_module()
+        flask_stub.current_app.config = {
+            "OPENAI_KEY": "token",
+            "OPENAI_URL": "https://example.invalid/v1",
+            "OPENAI_MODEL": "gpt-test",
+            "OPENAI_API_STYLE": "chat",
+        }
+        log_content = """2026-06-24 10:00:00 ERROR complaint failed
+java.lang.NullPointerException: null
+    at demo.Complaint.run(Complaint.java:42)
+"""
+        backend_summary = routes.build_backend_log_analysis(log_content)
+
+        routes.analyze_code_with_deepseek(log_content, backend_summary, [])
+
+        prompt = fake_openai.last_instance.chat.completions.calls[0]["messages"][1]["content"]
+        self.assertEqual(prompt.count("grouped_issue_count:"), 1)
+
     def test_routes_source_avoids_python310_fstring_backslash_expressions(self):
         source = ROUTES_PATH.read_text(encoding="utf-8")
         offenders = []
@@ -302,6 +541,22 @@ class AsyncAnalysisRouteTests(unittest.TestCase):
         self.assertEqual(call["model"], "gpt-5-codex")
         self.assertEqual(call["messages"][0]["role"], "system")
 
+    def test_chat_ai_model_sends_high_reasoning_effort(self):
+        routes, flask_stub, _, _, fake_openai = load_routes_module()
+        flask_stub.current_app.config = {
+            "OPENAI_KEY": "token",
+            "OPENAI_URL": "https://newapi.in.wezhuiyi.com/v1",
+            "OPENAI_MODEL": "gpt-5.6-sol",
+            "OPENAI_API_STYLE": "chat",
+            "OPENAI_REASONING_EFFORT": "high",
+        }
+
+        routes.call_ai_model("system prompt", "user prompt")
+
+        call = fake_openai.last_instance.chat.completions.calls[0]
+        self.assertEqual(call["model"], "gpt-5.6-sol")
+        self.assertEqual(call["reasoning_effort"], "high")
+
     def test_ai_model_can_use_responses_api_style(self):
         routes, flask_stub, _, _, fake_openai = load_routes_module()
         flask_stub.current_app.config = {
@@ -317,6 +572,22 @@ class AsyncAnalysisRouteTests(unittest.TestCase):
         call = fake_openai.last_instance.responses.calls[0]
         self.assertEqual(call["model"], "gpt-5-codex")
         self.assertEqual(call["input"][0]["role"], "system")
+
+    def test_responses_ai_model_sends_high_reasoning_effort(self):
+        routes, flask_stub, _, _, fake_openai = load_routes_module()
+        flask_stub.current_app.config = {
+            "OPENAI_KEY": "token",
+            "OPENAI_URL": "https://newapi.in.wezhuiyi.com/v1",
+            "OPENAI_MODEL": "gpt-5.6-sol",
+            "OPENAI_API_STYLE": "responses",
+            "OPENAI_REASONING_EFFORT": "high",
+        }
+
+        routes.call_ai_model("system prompt", "user prompt")
+
+        call = fake_openai.last_instance.responses.calls[0]
+        self.assertEqual(call["model"], "gpt-5.6-sol")
+        self.assertEqual(call["reasoning"], {"effort": "high"})
 
     def test_multimodal_ai_model_uses_image_input_blocks(self):
         routes, flask_stub, _, _, fake_openai = load_routes_module()
@@ -359,6 +630,28 @@ class AsyncAnalysisRouteTests(unittest.TestCase):
         self.assertEqual(result, "responses-result")
         content = fake_openai.last_instance.responses.calls[0]["input"][1]["content"]
         self.assertEqual([item["type"] for item in content], ["input_text", "input_image", "input_image"])
+
+    def test_multi_image_recognition_prompt_requires_per_image_findings(self):
+        routes, flask_stub, _, _, fake_openai = load_routes_module()
+        flask_stub.current_app.config = {
+            "OPENAI_KEY": "token",
+            "OPENAI_URL": "https://example.invalid/v1",
+            "OPENAI_MODEL": "gpt-test",
+            "OPENAI_API_STYLE": "chat",
+        }
+        with tempfile.TemporaryDirectory() as temp_dir:
+            image_paths = []
+            for name in ("first.png", "second.png"):
+                image_path = Path(temp_dir) / name
+                image_path.write_bytes(b"fake-png")
+                image_paths.append(str(image_path))
+            routes.analyze_uploaded_image(image_paths, "business_image", "两张错误截图")
+
+        content = fake_openai.last_instance.chat.completions.calls[0]["messages"][1]["content"]
+        prompt = next(item["text"] for item in content if item.get("type") == "text")
+        self.assertIn("逐张输出识别结果", prompt)
+        self.assertIn("第1张、第2张", prompt)
+        self.assertIn("只有确认是同一错误的重复截图时才允许合并", prompt)
 
     def test_build_image_analysis_context_includes_description_keywords_and_text(self):
         routes, _, _, _, _ = load_routes_module()
@@ -476,6 +769,30 @@ class AsyncAnalysisRouteTests(unittest.TestCase):
         self.assertNotIn("INFO noise 0", calls[0])
         self.assertNotIn("tail noise 19", calls[0])
 
+    def test_full_log_context_preserves_non_contiguous_error_events(self):
+        routes, _, _, _, _ = load_routes_module()
+        log_content = "\n".join([
+            "2026-06-24 18:01:37.332 INFO url=http://see-management-svc:9008/see-management/facade/llm-prompt/getSystemPrompt?typeCode=-2",
+            "2026-06-24 18:01:37.348 ERROR 40 --- ComplaintAnalysisService : complaint analysis error",
+            "java.lang.NullPointerException: null",
+            "    at com.zhuiyi.see.task.service.impl.ComplaintAnalysisService.doAnalyze(ComplaintAnalysisService.java:143)",
+            "2026-06-24 18:02:10.001 INFO unrelated heartbeat",
+            "2026-06-24 18:03:11.109 ERROR 40 --- GraphClientInterceptor : graph rpc unavailable",
+            "message: \"OnceQuerier doRequest return err:rpc error: code = Unavailable desc = connection closed\"",
+            "2026-06-24 18:04:00.001 INFO tail heartbeat",
+        ])
+
+        context = routes.build_full_log_analysis_context(log_content)
+
+        self.assertIn("grouped_issue_count: 2", context)
+        self.assertIn("[issue_group_1]", context)
+        self.assertIn("first_line: 2", context)
+        self.assertIn("ComplaintAnalysisService.java:143", context)
+        self.assertIn("[issue_group_2]", context)
+        self.assertIn("first_line: 6", context)
+        self.assertIn("graph rpc unavailable", context)
+        self.assertIn("connection closed", context)
+
     def test_code_analysis_compacts_oversized_log_context(self):
         routes, flask_stub, _, _, fake_openai = load_routes_module()
         flask_stub.current_app.config = {
@@ -543,6 +860,370 @@ ZeroDivisionError: division by zero
         self.assertEqual(snippets[0]["start_line"], 37)
         self.assertEqual(snippets[0]["end_line"], 46)
         self.assertIn(">>   42 | line 42", snippets[0]["numbered_snippet"])
+
+    def test_extracts_go_panic_file_and_line(self):
+        routes, _, _, _, _ = load_routes_module()
+        log_content = '''panic: runtime error: invalid memory address or nil pointer dereference
+
+goroutine 42 [running]:
+algorithm-platform/internal/trainer.(*Runner).Train(0xc00010a000)
+        /workspace/algorithm-platform/internal/trainer/runner.go:42 +0x12f
+main.main()
+        /workspace/algorithm-platform/cmd/train/main.go:18 +0x45
+'''
+
+        result = routes.extract_error_info_from_log(log_content)
+
+        self.assertEqual(result[0]["file"], "runner.go")
+        self.assertEqual(result[0]["line"], 42)
+        self.assertEqual(result[0]["error"], "panic: runtime error: invalid memory address or nil pointer dereference")
+        self.assertEqual(result[1]["file"], "main.go")
+        self.assertEqual(result[1]["line"], 18)
+
+    def test_extracts_shell_script_file_and_line(self):
+        routes, _, _, _, _ = load_routes_module()
+        log_content = """deploy.sh: line 27: kubectl: command not found
+worker.sh:43: exit status 1
+"""
+
+        result = routes.extract_error_info_from_log(log_content)
+
+        self.assertEqual(
+            [(item["file"], item["line"]) for item in result],
+            [("deploy.sh", 27), ("worker.sh", 43)],
+        )
+        self.assertTrue(all(item["language"] == "shell" for item in result))
+
+    def test_go_files_are_scanned_for_component_usages(self):
+        routes, _, _, _, _ = load_routes_module()
+        with tempfile.TemporaryDirectory() as repo_dir:
+            go_file = Path(repo_dir) / "cache.go"
+            go_file.write_text(
+                "\n".join([
+                    "package trainer",
+                    "",
+                    "import \"github.com/redis/go-redis/v9\"",
+                    "",
+                    "func cacheClient() *redis.Client {",
+                    "    return redis.NewClient(&redis.Options{})",
+                    "}",
+                ]),
+                encoding="utf-8",
+            )
+
+            components = routes.detect_error_components("redis dial tcp timeout")
+            snippets = routes.find_component_code_usages(repo_dir, components)
+
+        self.assertIn("redis", components)
+        self.assertTrue(any("cache.go" in item["file"] for item in snippets))
+        self.assertTrue(any("go-redis" in item["numbered_snippet"] for item in snippets))
+
+    def test_supported_source_suffixes_include_java_python_go_and_shell(self):
+        routes, _, _, _, _ = load_routes_module()
+
+        self.assertIn(".java", routes.SOURCE_CODE_SUFFIXES)
+        self.assertIn(".py", routes.SOURCE_CODE_SUFFIXES)
+        self.assertIn(".go", routes.SOURCE_CODE_SUFFIXES)
+        self.assertTrue({".sh", ".bash", ".zsh"}.issubset(routes.SOURCE_CODE_SUFFIXES))
+
+    def test_assesses_chain_relevance_when_downstream_response_fails(self):
+        routes, _, _, _, _ = load_routes_module()
+
+        result = routes.assess_chain_relevance(
+            "ERROR call downstream service failed, http status=500, response error"
+        )
+
+        self.assertTrue(result["requiresRelatedEvidence"])
+        self.assertEqual(result["status"], "need_related_evidence")
+        self.assertIn("上下游", result["message"])
+
+    def test_normalizes_openai_usage_limit_error(self):
+        routes, _, _, _, _ = load_routes_module()
+        raw_error = Exception("Error code: 429 - usage_limit_reached")
+        raw_error.status_code = 429
+        raw_error.response = FakeAiResponse()
+
+        normalized = routes.normalize_ai_exception(raw_error)
+
+        self.assertIsInstance(normalized, routes.AiServiceError)
+        self.assertEqual(normalized.status_code, 429)
+        self.assertEqual(normalized.error_type, "usage_limit_reached")
+        self.assertIn("额度", str(normalized))
+
+    def test_assesses_no_chain_relevance_for_local_exception(self):
+        routes, _, _, _, _ = load_routes_module()
+
+        result = routes.assess_chain_relevance(
+            "java.lang.NullPointerException: cannot invoke method"
+        )
+
+        self.assertFalse(result["requiresRelatedEvidence"])
+        self.assertEqual(result["status"], "no_related_evidence")
+        self.assertEqual(result["message"], "此问题不涉及上下游链路判断，开始分析故障原因。")
+
+    def test_discovers_related_modules_by_name_from_log_and_primary_code(self):
+        routes, _, _, _, _ = load_routes_module()
+        with tempfile.TemporaryDirectory() as repo_dir:
+            source_file = Path(repo_dir) / "TrainerClient.java"
+            source_file.write_text(
+                "\n".join([
+                    "class TrainerClient {",
+                    "  String publish = \"dialogos publish training task\";",
+                    "  String callback = \"java-callback-module/result\";",
+                    "}",
+                ]),
+                encoding="utf-8",
+            )
+            available_modules = [
+                {"module_id": 1, "module_name": "algorithm-platform"},
+                {"module_id": 2, "module_name": "dialogos"},
+                {"module_id": 3, "module_name": "java-callback-module"},
+            ]
+
+            related = routes.discover_related_modules(
+                repo_dir,
+                "algorithm-platform training failed, callback waits for java-callback-module",
+                available_modules,
+                primary_module_id=1,
+            )
+
+        by_name = {item["moduleName"]: item for item in related}
+        self.assertEqual(set(by_name), {"dialogos", "java-callback-module"})
+        self.assertEqual(by_name["dialogos"]["moduleId"], "2")
+        self.assertIn("主模块代码", by_name["dialogos"]["reason"])
+        self.assertIn("日志", by_name["java-callback-module"]["reason"])
+
+    def test_discovers_related_module_from_log_text_and_infers_downstream(self):
+        routes, _, _, _, _ = load_routes_module()
+
+        related = routes.discover_related_modules_from_text(
+            "ERROR SessionAsrTransferService asr transform error, http status=500",
+            [
+                {"module_id": 1, "module_name": "manifest"},
+                {"module_id": 2, "module_name": "asr"},
+            ],
+            primary_module_id=1,
+        )
+
+        self.assertEqual(len(related), 1)
+        self.assertEqual(related[0]["moduleName"], "asr")
+        self.assertEqual(related[0]["role"], "downstream")
+
+    def test_infers_missing_module_from_log_when_repo_list_has_no_match(self):
+        routes, _, _, _, _ = load_routes_module()
+
+        related = routes.discover_related_modules_from_text(
+            "com.zhuiyi.see.task.exception.SeeTaskException: 调用离线asr转写语音失败",
+            [{"module_id": 1, "module_name": "manifest"}],
+            primary_module_id=1,
+        )
+
+        names = {item["moduleName"] for item in related}
+        self.assertIn("see-task", names)
+        self.assertTrue(all(not item["moduleId"] for item in related))
+        self.assertIn("仓库", related[0]["reason"])
+
+    def test_does_not_infer_module_from_plain_camel_class_name(self):
+        routes, _, _, _, _ = load_routes_module()
+
+        related = routes.discover_related_modules_from_text(
+            'message: "OnceQuerier doRequest return err:rpc error: code = Unavailable"',
+            [{"module_id": 1, "module_name": "manifest"}],
+            primary_module_id=1,
+        )
+
+        self.assertEqual(related, [])
+
+    def test_infers_missing_module_from_http_service_url(self):
+        routes, _, _, _, _ = load_routes_module()
+
+        related = routes.discover_related_modules_from_text(
+            "url=http://see-management-svc:9008/see-management/facade/llm-prompt/getSystemPrompt?typeCode=-2, queryString=typeCode=-2",
+            [{"module_id": 1, "module_name": "manifest"}],
+            primary_module_id=1,
+        )
+
+        self.assertEqual([item["moduleName"] for item in related], ["see-management"])
+
+    def test_ignores_storage_url_bucket_when_package_names_real_module(self):
+        routes, _, _, _, _ = load_routes_module()
+
+        related = routes.discover_related_modules_from_text(
+            "com.zhuiyi.see.task.exception.SeeTaskException: Can not download file, please check url: "
+            "http://minio-cluster:9000/zhuiyi-see/mock/dataset-schedule/audio/mock-audio-18.wav",
+            [{"module_id": 1, "module_name": "manifest"}],
+            primary_module_id=1,
+        )
+
+        self.assertEqual([item["moduleName"] for item in related], ["see-task"])
+
+    def test_splits_chain_issue_candidates_with_previous_http_trace_context(self):
+        routes, _, _, _, _ = load_routes_module()
+
+        candidates = routes.split_chain_issue_candidates(
+            "\n".join([
+                "2026-06-24 18:01:37.332 INFO PromptServiceImpl 获取系统提示: -2",
+                "2026-06-24 18:01:37.333 INFO HttpTracedInterceptor url=http://see-management-svc:9008/see-management/facade/llm-prompt/getSystemPrompt?typeCode=-2, queryString=typeCode=-2",
+                "2026-06-24 18:01:37.347 INFO HttpTracedInterceptor call use cost:14ms",
+                "2026-06-24 18:01:37.348 ERROR ComplaintAnalysisService complaint analysis error",
+                "java.lang.NullPointerException: null",
+                "    at com.zhuiyi.see.task.service.impl.ComplaintAnalysisService.doAnalyze(ComplaintAnalysisService.java:143)",
+            ]),
+            [
+                {"module_id": 1, "module_name": "manifest"},
+                {"module_id": 2, "module_name": "see-management"},
+            ],
+            primary_module_id=1,
+        )
+
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0]["relatedModules"][0]["moduleName"], "see-management")
+        self.assertIn("see-management-svc", candidates[0]["issueSummary"])
+
+    def test_splits_chain_issue_candidates_scans_more_than_twelve_error_blocks(self):
+        routes, _, _, _, _ = load_routes_module()
+        lines = []
+        modules = [{"module_id": 1, "module_name": "manifest"}]
+        for index in range(15):
+            module_name = f"remote-{index}"
+            modules.append({"module_id": index + 2, "module_name": module_name})
+            lines.extend([
+                f"2026-06-24 18:00:{index:02d}.001 INFO HttpTracedInterceptor url=http://{module_name}-svc:9008/{module_name}/api",
+                f"2026-06-24 18:00:{index:02d}.002 ERROR RemoteCallService remote-{index} call failed",
+                f"java.lang.RuntimeException: remote-{index} failed",
+                f"2026-06-24 18:00:{index:02d}.003 INFO finished block {index}",
+            ])
+
+        candidates = routes.split_chain_issue_candidates(
+            "\n".join(lines),
+            modules,
+            primary_module_id=1,
+        )
+
+        self.assertEqual(len(candidates), 15)
+        self.assertEqual(candidates[-1]["relatedModules"][0]["moduleName"], "remote-14")
+
+    def test_relevant_log_context_keeps_last_error_batch_when_truncated(self):
+        routes, _, _, _, _ = load_routes_module()
+        lines = []
+        for index in range(25):
+            lines.extend([
+                f"2026-06-24 18:00:{index:02d}.001 INFO prepare block {index}",
+                f"2026-06-24 18:00:{index:02d}.002 ERROR early service-{index} failed with timeout",
+                f"java.lang.RuntimeException: early-{index}",
+            ])
+        lines.extend([
+            "2026-06-24 19:59:58.001 INFO HttpTracedInterceptor url=http://see-management-svc:9008/see-management/api",
+            "2026-06-24 19:59:59.002 ERROR final batch complaint analysis error",
+            "java.lang.NullPointerException: final-marker",
+        ])
+
+        context = routes.extract_relevant_log_context(
+            "\n".join(lines),
+            context_lines=1,
+            max_chars=1800,
+        )
+
+        self.assertIn("early service-0 failed", context)
+        self.assertIn("final batch complaint analysis error", context)
+        self.assertIn("see-management-svc", context)
+
+    def test_splits_chain_issue_candidates_by_distinct_modules(self):
+        routes, _, _, _, _ = load_routes_module()
+
+        candidates = routes.split_chain_issue_candidates(
+            "\n".join([
+                "2026-06-24 ERROR SessionAsrTransferService asr transform error http status=500",
+                "2026-06-24 ERROR DialogosCallbackClient dialogos callback timeout",
+            ]),
+            [
+                {"module_id": 1, "module_name": "manifest"},
+                {"module_id": 2, "module_name": "asr"},
+                {"module_id": 3, "module_name": "dialogos"},
+            ],
+            primary_module_id=1,
+        )
+
+        self.assertEqual(len(candidates), 2)
+        self.assertEqual(candidates[0]["relatedModules"][0]["moduleName"], "asr")
+        self.assertEqual(candidates[1]["relatedModules"][0]["moduleName"], "dialogos")
+
+    def test_builds_analysis_repositories_from_primary_and_related_modules(self):
+        routes, _, _, _, _ = load_routes_module()
+        data = {
+            "moduleId": "1",
+            "branchAddress": "https://git.example/primary.git",
+            "tagVersion": "v1",
+            "relatedModules": [
+                {
+                    "moduleId": "2",
+                    "moduleName": "dialogos",
+                    "role": "related",
+                    "branchAddress": "https://git.example/dialogos.git",
+                    "tagVersion": "v2",
+                }
+            ],
+        }
+
+        repositories = routes.build_analysis_repositories(data, "task-123")
+
+        self.assertEqual([item["role"] for item in repositories], ["primary", "related"])
+        self.assertEqual(repositories[0]["branchAddress"], "https://git.example/primary.git")
+        self.assertEqual(repositories[1]["moduleName"], "dialogos")
+        self.assertEqual(repositories[1]["workspaceId"], "task-123")
+
+    def test_clones_analysis_repositories_in_parallel(self):
+        routes, _, _, _, _ = load_routes_module()
+        repositories = [
+            {"branchAddress": f"https://git.example/repo-{index}.git", "tagVersion": "v1", "workspaceId": "task"}
+            for index in range(4)
+        ]
+        lock = threading.Lock()
+        active = 0
+        max_active = 0
+
+        def fake_clone(address, tag_version, workspace_id=None):
+            nonlocal active, max_active
+            with lock:
+                active += 1
+                max_active = max(max_active, active)
+            time.sleep(0.05)
+            with lock:
+                active -= 1
+            return f"/tmp/{Path(address).stem}-{tag_version}"
+
+        cloned = routes.clone_analysis_repositories(repositories, fake_clone, max_workers=4)
+
+        self.assertEqual(len(cloned), 4)
+        self.assertGreater(max_active, 1)
+
+    def test_assesses_related_code_owner_from_selected_downstream_version(self):
+        routes, _, _, _, _ = load_routes_module()
+        with tempfile.TemporaryDirectory() as repo_dir:
+            source_file = Path(repo_dir) / "DialogosCallbackClient.java"
+            source_file.write_text(
+                "\n".join([
+                    "class DialogosCallbackClient {",
+                    "  void notifyResult() { httpClient.post(\"/callback/result\"); }",
+                    "}",
+                ]),
+                encoding="utf-8",
+            )
+            decision = routes.assess_chain_relevance("HTTP 500 callback response error")
+            result = routes.assess_related_code_ownership(
+                "HTTP 500 callback response error",
+                decision,
+                [{
+                    "role": "downstream",
+                    "moduleId": "2",
+                    "moduleName": "dialogos",
+                    "repo_path": repo_dir,
+                }],
+            )
+
+        self.assertTrue(result["requiresRelatedEvidence"])
+        self.assertEqual(result["chainOwner"], "downstream")
+        self.assertIn("下游", result["message"])
 
     def test_build_code_findings_names_file_line_and_code_block(self):
         routes, _, _, _, _ = load_routes_module()
@@ -638,6 +1319,65 @@ ZeroDivisionError: division by zero
 
         self.assertNotEqual(release_fingerprint, old_tag_fingerprint)
 
+    def test_error_fingerprint_is_scoped_by_related_repository_versions(self):
+        routes, _, _, _, _ = load_routes_module()
+        error_info = [{
+            "file": "Demo.java",
+            "line": 42,
+            "error": "java.lang.NullPointerException: null",
+        }]
+        base_args = (
+            "45",
+            "251",
+            error_info,
+            "https://code.in.wezhuiyi.com/see/see-task.git",
+            "v2.10.1",
+        )
+
+        release_one = routes.build_error_fingerprint(
+            *base_args,
+            related_modules=[{
+                "moduleName": "see-management",
+                "role": "downstream",
+                "branchAddress": "https://code.in.wezhuiyi.com/see/see-management.git",
+                "tagVersion": "release-1",
+            }],
+        )
+        release_two = routes.build_error_fingerprint(
+            *base_args,
+            related_modules=[{
+                "moduleName": "see-management",
+                "role": "downstream",
+                "branchAddress": "https://code.in.wezhuiyi.com/see/see-management.git",
+                "tagVersion": "release-2",
+            }],
+        )
+
+        self.assertNotEqual(release_one, release_two)
+
+    def test_extracts_related_repository_code_from_logged_api_path(self):
+        routes, _, _, _, _ = load_routes_module()
+        with tempfile.TemporaryDirectory() as repo_dir:
+            controller = Path(repo_dir) / "DatasetController.java"
+            controller.write_text(
+                '@PostMapping("/facade/dataset/update-session")\n'
+                'public void updateSession() {}\n',
+                encoding="utf-8",
+            )
+            log_content = (
+                "url=http://see-dataset-svc:9005/see-dataset/"
+                "facade/dataset/update-session, queryString=null"
+            )
+
+            snippets = routes.find_related_repository_code_usages(
+                repo_dir,
+                log_content,
+                components=[],
+            )
+
+            self.assertTrue(any("DatasetController.java" in item["file"] for item in snippets))
+            self.assertTrue(any("update-session" in item["numbered_snippet"] for item in snippets))
+
     def test_parses_structured_issue_conclusion_from_ai_json(self):
         routes, _, _, _, _ = load_routes_module()
         ai_text = """
@@ -688,6 +1428,247 @@ ZeroDivisionError: division by zero
 
         self.assertEqual(conclusion["query_commands"], ["grep -n 'timeout' application.yml"])
         self.assertEqual(conclusion["fix_commands"], ["sed -i 's/timeout: 30/timeout: 300/' application.yml"])
+
+    def test_parse_issue_conclusion_normalizes_multiple_issues(self):
+        routes, _, _, _, _ = load_routes_module()
+
+        conclusion = routes.parse_issue_conclusion(
+            """
+            {
+              "issue_category": "dependency_issue",
+              "conclusion_summary": "Multiple failures were found.",
+              "issues": [
+                {
+                  "title": "ASR audio download failed",
+                  "issue_category": "dependency_issue",
+                  "summary": "ASR could not download MinIO audio.",
+                  "root_cause": "MinIO URL returned download failure.",
+                  "solution": "Check object existence and bucket permission.",
+                  "evidence": ["line 23 SeeTaskException", "line 88 Can not download file"],
+                  "query_commands": "grep -n 'Can not download file' app.log",
+                  "fix_commands": ["mc stat minio/zhuiyi-see/mock/audio.wav"],
+                  "code_locations": [
+                    {"file": "BaseAsrTransferService.java", "line": 226, "reason": "callback converts ASR failure"}
+                  ]
+                },
+                {
+                  "title": "Callback marked failed flow as success",
+                  "issue_category": "code_issue",
+                  "summary": "Callback log misleads the diagnosis.",
+                  "evidence": ["line 44 callback handle success"],
+                  "code_locations": [
+                    {"file": "AsrTransformController.java", "line": 44}
+                  ]
+                }
+              ]
+            }
+            """
+        )
+
+        self.assertEqual(len(conclusion["issues"]), 2)
+        self.assertEqual(conclusion["issue_count"], 2)
+        self.assertEqual(conclusion["issues"][0]["title"], "ASR audio download failed")
+        self.assertEqual(conclusion["issues"][0]["query_commands"], ["grep -n 'Can not download file' app.log"])
+        self.assertEqual(conclusion["issues"][0]["fix_commands"], ["mc stat minio/zhuiyi-see/mock/audio.wav"])
+        self.assertEqual(conclusion["issues"][0]["code_locations"][0]["file"], "BaseAsrTransferService.java")
+        self.assertEqual(conclusion["issues"][1]["issue_category"], "code_issue")
+
+    def test_parse_issue_conclusion_accepts_issue_and_command_field_aliases(self):
+        routes, _, _, _, _ = load_routes_module()
+        conclusion = routes.parse_issue_conclusion(
+            json.dumps({
+                "issue_category": "dependency_issue",
+                "conclusion_summary": "识别到两个独立问题",
+                "issue_details": [
+                    {
+                        "title": "依赖下载失败",
+                        "summary": "依赖包无法下载",
+                        "fix_commond": ["pip install demo-package"],
+                    },
+                    {
+                        "title": "服务连接失败",
+                        "summary": "目标服务拒绝连接",
+                        "query_command": "curl -v http://service/health",
+                    },
+                ],
+            }, ensure_ascii=False)
+        )
+
+        self.assertEqual(conclusion["issue_count"], 2)
+        self.assertEqual(conclusion["issues"][0]["fix_commands"], ["pip install demo-package"])
+        self.assertEqual(conclusion["issues"][1]["query_commands"], ["curl -v http://service/health"])
+
+    def test_parse_issue_conclusion_accepts_problem_details_and_singular_command_fields(self):
+        routes, _, _, _, _ = load_routes_module()
+        conclusion = routes.parse_issue_conclusion(
+            json.dumps({
+                "problem_details": [
+                    {"title": "问题一", "fix_command": "command-1"},
+                    {"title": "问题二", "query_commond": ["command-2"]},
+                ]
+            }, ensure_ascii=False)
+        )
+
+        self.assertEqual(conclusion["issue_count"], 2)
+        self.assertEqual(conclusion["issues"][0]["fix_commands"], ["command-1"])
+        self.assertEqual(conclusion["issues"][1]["query_commands"], ["command-2"])
+
+    def test_image_prompt_requires_visible_errors_even_when_local_ocr_finds_none(self):
+        routes, flask_stub, _, _, fake_openai = load_routes_module()
+        flask_stub.current_app.config = {
+            "OPENAI_KEY": "token",
+            "OPENAI_URL": "https://example.invalid/v1",
+            "OPENAI_MODEL": "gpt-test",
+            "OPENAI_API_STYLE": "chat",
+        }
+        with tempfile.TemporaryDirectory() as temp_dir:
+            image_paths = []
+            for name in ("first.png", "second.png"):
+                image_path = Path(temp_dir) / name
+                image_path.write_bytes(b"fake-png")
+                image_paths.append(str(image_path))
+            routes.analyze_code_with_deepseek(
+                "image_tag=business_image",
+                "grouped_issue_count: 0\nNo explicit ERROR/Exception/FATAL/panic event was detected.",
+                [],
+                image_analysis={"image_tag": "business_image", "image_description": "包含两个错误的截图"},
+                image_paths=image_paths,
+            )
+
+        prompt = fake_openai.last_instance.chat.completions.calls[0]["messages"][1]["content"]
+        image_blocks = [item for item in prompt if isinstance(item, dict) and item.get("type") == "image_url"]
+        self.assertEqual(len(image_blocks), 2)
+        if isinstance(prompt, list):
+            prompt = "\n".join(str(item.get("text") or "") for item in prompt if isinstance(item, dict))
+        self.assertIn("不能因为本地 OCR 未识别到文字", prompt)
+        self.assertIn("逐个识别原图中所有可见的错误", prompt)
+        self.assertIn("第1张、第2张", prompt)
+
+    def test_extract_log_error_events_keeps_late_null_pointer_after_asr_stack(self):
+        routes, _, _, _, _ = load_routes_module()
+        stack_padding = "\n".join(
+            f"    at org.springframework.demo.Filter{i}.doFilter(Filter{i}.java:{i})"
+            for i in range(1, 32)
+        )
+        log_content = f"""
+2026-06-24 17:44:45.900 ERROR 40 --- [io-9007-exec-18] c.z.s.t.s.asr.SessionAsrTransferService : [] 4-48-703 asr transform error
+
+com.zhuiyi.see.task.exception.SeeTaskException: 调用离线asr转写语音失败,错误原因: Can not download file, please check url: http://minio-cluster:9000/zhuiyi-see/mock/dataset-schedule/audio/mock-audio-18.wav and disk space.
+    at com.zhuiyi.see.task.service.asr.BaseAsrTransferService.handleCallback(BaseAsrTransferService.java:226)
+    at com.zhuiyi.see.task.controller.AsrTransformController.asrCallback(AsrTransformController.java:44)
+{stack_padding}
+2026-06-24 18:01:37.228 INFO 40 --- [bot-check-3] c.z.s.t.service.impl.LLMCheckServiceImpl : complaint response
+2026-06-24 18:01:37.332 INFO 40 --- [bot-check-3] c.z.s.t.service.impl.PromptServiceImpl : get system prompt: -2
+2026-06-24 18:01:37.348 ERROR 40 --- [bot-check-3] c.z.s.t.s.impl.ComplaintAnalysisService : [] 4-28 complaint analysis error
+
+java.lang.NullPointerException: null
+    at com.zhuiyi.see.task.service.impl.ComplaintAnalysisService.doAnalyze(ComplaintAnalysisService.java:143)
+    at com.zhuiyi.see.task.service.impl.ComplaintAnalysisService.analyze(ComplaintAnalysisService.java:95)
+    at com.zhuiyi.see.task.service.impl.BotCheckTaskServiceImpl.checkOneTask(BotCheckTaskServiceImpl.java:1091)
+"""
+
+        events = routes.extract_log_error_events(log_content)
+        summary = routes.build_log_error_event_summary(log_content)
+
+        self.assertEqual(len(events), 2)
+        self.assertIn("SeeTaskException", events[0]["text"])
+        self.assertIn("BaseAsrTransferService.java:226", events[0]["text"])
+        self.assertIn("NullPointerException", events[1]["text"])
+        self.assertIn("ComplaintAnalysisService.java:143", events[1]["text"])
+        self.assertIn("2", summary)
+
+    def test_groups_duplicate_errors_but_keeps_late_independent_exception(self):
+        routes, _, _, _, _ = load_routes_module()
+        log_content = """2026-06-24 10:00:00 ERROR asr transform error
+SeeTaskException: Can not download file
+    at demo.Asr.run(Asr.java:10)
+2026-06-24 10:00:01 ERROR asr transform error
+SeeTaskException: Can not download file
+    at demo.Asr.run(Asr.java:10)
+2026-06-24 10:00:02 ERROR asr transform error
+SeeTaskException: Can not download file
+    at demo.Asr.run(Asr.java:10)
+2026-06-24 10:05:00 ERROR complaint analysis error
+java.lang.NullPointerException: null
+    at demo.Complaint.run(Complaint.java:42)
+"""
+
+        grouped = routes.group_log_error_events(routes.extract_log_error_events(log_content))
+
+        self.assertEqual(len(grouped), 2)
+        self.assertEqual(grouped[0]["occurrence_count"], 3)
+        self.assertIn("NullPointerException", grouped[1]["representative_text"])
+        self.assertLess(grouped[0]["first_line"], grouped[1]["first_line"])
+
+    def test_error_fingerprint_includes_every_group_signature(self):
+        routes, _, _, _, _ = load_routes_module()
+        first_error = [{"error": "SeeTaskException: ASR download failed", "file": "AsrService.java"}]
+        asr_group = {"signature": "seetaskexception|asr download failed|java:AsrService.java:226"}
+        npe_group = {"signature": "nullpointerexception|null|java:ComplaintService.java:143"}
+
+        asr_only = routes.build_error_fingerprint(
+            "46", "256", first_error, grouped_log_errors=[asr_group]
+        )
+        asr_and_npe = routes.build_error_fingerprint(
+            "46", "256", first_error, grouped_log_errors=[asr_group, npe_group]
+        )
+
+        self.assertNotEqual(asr_only, asr_and_npe)
+
+    def test_error_extraction_ignores_error_level_success_records(self):
+        routes, _, _, _, _ = load_routes_module()
+        log_content = "\n".join([
+            '2026-06-24 17:57:05.761 ERROR GraphEngineHandler : 打标结果为 message: "success"',
+            "2026-06-24 18:01:37.348 ERROR ComplaintAnalysisService : complaint analysis error",
+            "java.lang.NullPointerException: null",
+            "\tat demo.ComplaintService.run(ComplaintService.java:143)",
+        ])
+
+        events = routes.extract_log_error_events(log_content)
+
+        self.assertEqual(len(events), 1)
+        self.assertIn("NullPointerException", events[0]["text"])
+
+    def test_backend_summary_represents_every_group_with_independent_budget(self):
+        routes, _, _, _, _ = load_routes_module()
+        large_asr_stack = "\n".join(
+            f"    at demo.Filter{index}.run(Filter{index}.java:{index})"
+            for index in range(1, 60)
+        )
+        log_content = f"""2026-06-24 10:00:00 ERROR ASR transform error
+SeeTaskException: Can not download file
+{large_asr_stack}
+2026-06-24 10:05:00 ERROR complaint analysis error
+java.lang.NullPointerException: null
+    at demo.Complaint.run(Complaint.java:42)
+"""
+
+        summary = routes.build_backend_log_analysis(log_content, max_chars=1800)
+
+        self.assertIn("ASR", summary)
+        self.assertIn("NullPointerException", summary)
+        self.assertIn("occurrence_count", summary)
+
+    def test_full_file_scan_keeps_error_after_more_than_one_hundred_twenty_events(self):
+        routes, _, _, _, _ = load_routes_module()
+        repeated = "\n".join(
+            f"""2026-06-24 10:{index // 60:02d}:{index % 60:02d} ERROR ASR transform error
+SeeTaskException: Can not download file
+    at demo.Asr.run(Asr.java:10)"""
+            for index in range(125)
+        )
+        log_content = repeated + """
+2026-06-24 12:30:00 ERROR complaint analysis error
+java.lang.NullPointerException: null
+    at demo.Complaint.run(Complaint.java:42)
+"""
+
+        events = routes.extract_log_error_events(log_content)
+        grouped = routes.group_log_error_events(events)
+
+        self.assertEqual(len(events), 126)
+        self.assertEqual(len(grouped), 2)
+        self.assertIn("NullPointerException", grouped[-1]["representative_text"])
 
     def test_issue_category_labels_are_readable_chinese(self):
         routes, _, _, _, _ = load_routes_module()

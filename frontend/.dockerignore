@@ -1,0 +1,11 @@
+.env
+.env.*
+node_modules
+app/log-analyze/node_modules
+dist
+app/log-analyze/dist
+# app/log-analyze/build 是 Webpack 构建辅助源码目录，不能从 Docker 上下文排除。
+coverage
+*.log
+.git
+.idea

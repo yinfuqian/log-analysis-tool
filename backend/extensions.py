@@ -1,3 +1,4 @@
+"""extensions 模块负责本文件相关的业务流程、数据转换与依赖协作。"""
 from flask_sqlalchemy import SQLAlchemy
 from flask_migrate import Migrate
 from redis import Redis
@@ -25,6 +26,7 @@ def init_redis(app):
 
 
 def init_celery(app):
+    """处理 init_celery 对应的业务步骤，并向调用方返回所需结果。"""
     celery.conf.update(
         broker_url=app.config["CELERY_BROKER_URL"],
         result_backend=app.config["CELERY_RESULT_BACKEND"],
@@ -43,7 +45,9 @@ def init_celery(app):
     )
 
     class FlaskContextTask(celery.Task):
+        """FlaskContextTask 类封装该领域对象的状态、依赖与相关行为。"""
         def __call__(self, *args, **kwargs):
+            """处理 __call__ 对应的业务步骤，并向调用方返回所需结果。"""
             with app.app_context():
                 return self.run(*args, **kwargs)
 

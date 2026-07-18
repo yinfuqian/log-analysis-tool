@@ -1,9 +1,11 @@
+"""model 模块负责本文件相关的业务流程、数据转换与依赖协作。"""
 from datetime import datetime
 from sqlalchemy import Boolean, Column, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import relationship
 from extensions import db
 
 class Log(db.Model):
+    """Log 类封装该领域对象的状态、依赖与相关行为。"""
     __tablename__ = 'logs'
 
     id = Column(Integer, primary_key=True, autoincrement=True)
@@ -13,11 +15,13 @@ class Log(db.Model):
     count = db.Column(db.Integer, default=1)  # 确保这里是 Integer
 
     def __repr__(self):
+        """返回便于日志记录和调试查看的对象表示。"""
         return f'<Log {self.id} - {self.module_name}>'
 
 
 
 class QueryRecord(db.Model):
+    """QueryRecord 类封装该领域对象的状态、依赖与相关行为。"""
     __tablename__ = 'query_records'
 
     id = Column(Integer, primary_key=True, autoincrement=True)
@@ -43,10 +47,12 @@ class QueryRecord(db.Model):
     knowledge_case = relationship("AnalysisKnowledgeCase", backref="query_records")
 
     def __repr__(self):
+        """返回便于日志记录和调试查看的对象表示。"""
         return f'<QueryRecord {self.id} - Product {self.product_id} - Module {self.module_id}>'
 
 
 class AnalysisKnowledgeCase(db.Model):
+    """AnalysisKnowledgeCase 类封装该领域对象的状态、依赖与相关行为。"""
     __tablename__ = 'analysis_knowledge_cases'
     __table_args__ = (
         UniqueConstraint('product_id', 'module_id', 'error_fingerprint', name='uq_knowledge_case_scope_fingerprint'),
@@ -78,4 +84,5 @@ class AnalysisKnowledgeCase(db.Model):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     def __repr__(self):
+        """返回便于日志记录和调试查看的对象表示。"""
         return f'<AnalysisKnowledgeCase {self.id} - {self.error_fingerprint}>'

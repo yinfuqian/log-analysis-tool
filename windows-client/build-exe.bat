@@ -1,3 +1,4 @@
+REM build-exe 脚本负责 Windows 客户端的启动或构建流程。
 @echo off
 setlocal
 cd /d "%~dp0"
@@ -12,7 +13,7 @@ if %errorlevel% neq 0 (
   exit /b %errorlevel%
 )
 
-python -m PyInstaller --onefile --windowed --name LogAnalyzerClient log_analyzer_client.py
+python -m PyInstaller --onefile --windowed --name FaultAnalyzerClient log_analyzer_client.py
 if %errorlevel% neq 0 (
   echo.
   echo Build failed. Install dependencies first:
@@ -26,4 +27,4 @@ if exist client_build_info.py.bak del /Q client_build_info.py.bak
 
 echo.
 echo Build complete:
-echo %~dp0dist\LogAnalyzerClient.exe
+echo %~dp0dist\FaultAnalyzerClient.exe

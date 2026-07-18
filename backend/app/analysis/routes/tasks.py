@@ -1,3 +1,4 @@
+"""tasks 模块负责本文件相关的业务流程、数据转换与依赖协作。"""
 import hashlib
 import logging
 import os
@@ -7,6 +8,7 @@ from extensions import celery
 
 
 def report_progress(task, stage, stage_label, stage_percent, percent, message=None):
+    """处理 report_progress 对应的业务步骤，并向调用方返回所需结果。"""
     meta = {
         "stage": stage,
         "stage_label": stage_label,
@@ -18,15 +20,61 @@ def report_progress(task, stage, stage_label, stage_percent, percent, message=No
     return meta
 
 
-def build_analysis_evidence(error_info, resolved_errors, code_snippets):
+def build_analysis_evidence(
+    error_info,
+    resolved_errors,
+    code_snippets,
+    log_error_events=None,
+    grouped_log_errors=None,
+    detected_languages=None,
+    ai_call_count=0,
+    repositories=None,
+):
+    """构建并返回 build_analysis_evidence 对应的业务数据，保持现有调用约定。"""
     snippet_files = []
+    module_counts = {}
     for snippet in code_snippets or []:
         file_path = snippet.get("file") if isinstance(snippet, dict) else None
         if file_path and file_path not in snippet_files:
             snippet_files.append(file_path)
+        if not isinstance(snippet, dict):
+            continue
+        role = str(snippet.get("module_role") or "primary")
+        name = str(snippet.get("module_name") or "primary")
+        module_counts[(role, name)] = module_counts.get((role, name), 0) + 1
+
+    code_context_modules = [
+        {"role": role, "moduleName": name, "snippetCount": count}
+        for (role, name), count in module_counts.items()
+    ]
+    selected_code_repositories = [
+        {
+            "role": repository.get("role") or "related",
+            "moduleId": repository.get("moduleId"),
+            "moduleName": repository.get("moduleName"),
+            "branchAddress": repository.get("branchAddress"),
+            "tagVersion": repository.get("tagVersion"),
+            "cloned": bool(repository.get("repo_path")),
+        }
+        for repository in (repositories or [])
+        if isinstance(repository, dict)
+    ]
+    related_code_modules = [
+        item for item in code_context_modules if item.get("role") != "primary"
+    ]
 
     return {
         "used_code_context": bool(code_snippets),
+        "used_related_code_context": bool(related_code_modules),
+        "related_code_module_count": len(related_code_modules),
+        "code_context_modules": code_context_modules,
+        "selected_code_repositories": selected_code_repositories,
+        "log_error_event_count": len(log_error_events or []),
+        "log_error_events": log_error_events or [],
+        "grouped_issue_count": len(grouped_log_errors or []),
+        "grouped_log_errors": grouped_log_errors or [],
+        "detected_languages": list(detected_languages or []),
+        "ai_call_count": int(ai_call_count or 0),
         "error_info_count": len(error_info or []),
         "resolved_file_count": len(resolved_errors or []),
         "code_snippet_count": len(code_snippets or []),
@@ -35,6 +83,7 @@ def build_analysis_evidence(error_info, resolved_errors, code_snippets):
 
 
 def merge_component_candidates(*groups):
+    """合并整理并返回 merge_component_candidates 对应的业务数据，保持现有调用约定。"""
     items = []
     for group in groups:
         for item in group or []:
@@ -44,7 +93,144 @@ def merge_component_candidates(*groups):
     return items
 
 
+def should_use_knowledge_cache(source_type):
+    """判断 should_use_knowledge_cache 对应的业务数据，保持现有调用约定。"""
+    return str(source_type or "file").strip().lower() != "image"
+
+
+def _normalize_task_image_ocr(payload):
+    """规范化并返回 _normalize_task_image_ocr 对应的业务数据，保持现有调用约定。"""
+    data = payload if isinstance(payload, dict) else {}
+    try:
+        average_confidence = float(data.get("average_confidence") or 0.0)
+    except (TypeError, ValueError):
+        average_confidence = 0.0
+    return {
+        "available": bool(data.get("available")),
+        "engine": str(data.get("engine") or "paddleocr"),
+        "extracted_text": str(data.get("extracted_text") or "").strip(),
+        "lines": [item for item in (data.get("lines") or []) if isinstance(item, dict)],
+        "average_confidence": average_confidence,
+        "warnings": [str(item) for item in (data.get("warnings") or []) if str(item or "").strip()],
+    }
+
+
+def build_image_ocr_log_content(data, input_paths, ocr_extractor=None):
+    """构建并返回 build_image_ocr_log_content 对应的业务数据，保持现有调用约定。"""
+    image_ocr = _normalize_task_image_ocr(data.get("image_ocr"))
+    if not image_ocr.get("extracted_text"):
+        enabled = str(os.getenv("LOCAL_OCR_ENABLED", "true")).strip().lower() not in {
+            "0", "false", "no", "off",
+        }
+        if enabled:
+            try:
+                if ocr_extractor is None:
+                    from app.analysis.image_ocr import extract_text_from_images
+                    ocr_extractor = extract_text_from_images
+                image_ocr = _normalize_task_image_ocr(ocr_extractor(
+                    input_paths,
+                    min_confidence=float(os.getenv("OCR_MIN_CONFIDENCE", "0.45")),
+                ))
+            except TypeError:
+                image_ocr = _normalize_task_image_ocr(ocr_extractor(input_paths))
+            except Exception as exc:
+                logging.exception("Local OCR task fallback failed")
+                image_ocr["warnings"].append(str(exc))
+
+    metadata = [
+        f"image_tag: {data.get('image_tag') or ''}",
+        f"image_description: {data.get('image_description') or ''}",
+        "image_files: " + ", ".join(os.path.basename(path) for path in input_paths or []),
+    ]
+    log_content = "\n".join(filter(None, [image_ocr.get("extracted_text"), *metadata]))
+    return log_content, image_ocr
+
+
+def read_text_file_for_analysis(file_path):
+    """读取并返回 read_text_file_for_analysis 对应的业务数据，保持现有调用约定。"""
+    if not file_path or not os.path.exists(file_path):
+        return ""
+    for encoding in ("utf-8", "utf-8-sig", "gb18030"):
+        try:
+            with open(file_path, "r", encoding=encoding) as file_obj:
+                return file_obj.read()
+        except UnicodeDecodeError:
+            continue
+        except OSError:
+            return ""
+    return ""
+
+
+def build_related_evidence_context(related_evidence):
+    """构建并返回 build_related_evidence_context 对应的业务数据，保持现有调用约定。"""
+    sections = []
+    related_image_paths = []
+    for index, evidence in enumerate(related_evidence or [], start=1):
+        label = evidence.get("label") or evidence.get("role") or f"related-{index}"
+        source_type = str(evidence.get("source_type") or "file").lower()
+        description = evidence.get("description") or ""
+        if source_type == "image":
+            image_paths = [path for path in (evidence.get("file_paths") or []) if path]
+            if evidence.get("file_path") and evidence.get("file_path") not in image_paths:
+                image_paths.insert(0, evidence.get("file_path"))
+            if not image_paths:
+                continue
+            try:
+                related_image_paths.extend(
+                    path for path in image_paths if path not in related_image_paths
+                )
+                ocr_text, image_ocr = build_image_ocr_log_content(
+                    {
+                        "image_tag": evidence.get("image_tag") or "related_image",
+                        "image_description": description,
+                        "image_ocr": evidence.get("image_ocr"),
+                    },
+                    image_paths,
+                )
+                image_analysis = {
+                    "analysis_text": "\n".join([
+                        f"image_tag: {evidence.get('image_tag') or 'related_image'}",
+                        f"description: {description}",
+                        "image_files: " + ", ".join(os.path.basename(path) for path in image_paths),
+                        ocr_text,
+                    ])
+                }
+                text = image_analysis.get("analysis_text") or ""
+            except Exception:
+                logging.exception("上下游图片证据识别失败：%s", label)
+                text = description
+        else:
+            text = read_text_file_for_analysis(evidence.get("file_path"))
+        if text:
+            sections.append(f"【上下游补充证据 {index}: {label}】\n{text}")
+    return "\n\n".join(sections), related_image_paths
+
+
+def build_skipped_chain_issue_context(skipped_issues):
+    """构建并返回 build_skipped_chain_issue_context 对应的业务数据，保持现有调用约定。"""
+    lines = []
+    for index, issue in enumerate(skipped_issues or [], start=1):
+        summary = str(issue.get("issueSummary") or "").strip()
+        reason = str(issue.get("reason") or "").strip()
+        modules = issue.get("relatedModules") or []
+        module_names = [
+            str(module.get("moduleName") or module.get("moduleId") or "").strip()
+            for module in modules
+            if isinstance(module, dict) and (module.get("moduleName") or module.get("moduleId"))
+        ]
+        lines.append(f"【跳过上下游补充条件 {index}】")
+        if summary:
+            lines.append(f"异常摘要: {summary}")
+        if module_names:
+            lines.append("疑似上下游模块: " + ", ".join(module_names))
+        if reason:
+            lines.append(f"跳过原因: {reason}")
+        lines.append("说明: 仅跳过该类异常的上下游代码/日志补充条件；原始日志中的该异常仍必须参与最终故障分析。")
+    return "\n".join(lines)
+
+
 def _path_is_under(path, directory):
+    """处理 _path_is_under 对应的业务步骤，并向调用方返回所需结果。"""
     if not path or not directory:
         return False
     try:
@@ -56,6 +242,7 @@ def _path_is_under(path, directory):
 
 
 def _default_upload_dir():
+    """处理 _default_upload_dir 对应的业务步骤，并向调用方返回所需结果。"""
     try:
         from flask import current_app
 
@@ -65,6 +252,7 @@ def _default_upload_dir():
 
 
 def cleanup_analysis_files(data, repo_path=None, task_id=None, upload_dir=None, repo_base_dir="/tmp/log-analyzer-repos"):
+    """清理 cleanup_analysis_files 对应的业务数据，保持现有调用约定。"""
     upload_dir = upload_dir or _default_upload_dir()
     uploaded_files = []
     if isinstance(data, dict):
@@ -91,8 +279,8 @@ def cleanup_analysis_files(data, repo_path=None, task_id=None, upload_dir=None, 
         except OSError:
             logging.exception("?????????%s", uploaded_file)
 
-    if repo_path and task_id:
-        real_repo_path = os.path.realpath(repo_path)
+    if task_id:
+        real_repo_path = os.path.realpath(repo_path) if repo_path else None
         real_repo_base = os.path.realpath(repo_base_dir)
         task_workspace = os.path.realpath(os.path.join(real_repo_base, str(task_id)))
         result["repo_workspace_path"] = task_workspace
@@ -100,7 +288,7 @@ def cleanup_analysis_files(data, repo_path=None, task_id=None, upload_dir=None, 
         if (
             os.path.basename(task_workspace) == str(task_id)
             and _path_is_under(task_workspace, real_repo_base)
-            and _path_is_under(real_repo_path, task_workspace)
+            and (not real_repo_path or _path_is_under(real_repo_path, task_workspace))
             and os.path.isdir(task_workspace)
         ):
             try:
@@ -114,21 +302,31 @@ def cleanup_analysis_files(data, repo_path=None, task_id=None, upload_dir=None, 
 
 @celery.task(bind=True, name="analysis.analyze_log_task")
 def analyze_log_task(self, data):
+    """执行故障分析并返回 analyze_log_task 对应的业务数据，保持现有调用约定。"""
     from app.analysis.routes.routes import (
-        analyze_uploaded_image,
+        annotate_code_snippets,
         analyze_code_with_deepseek,
-        analyze_log_with_deepseek,
+        AiServiceError,
+        build_analysis_repositories,
+        build_backend_log_analysis,
         build_cached_analysis_payload,
         build_code_findings,
         build_error_fingerprint,
+        clone_analysis_repositories,
         clone_git_repo,
         detect_error_components,
+        detect_log_languages,
         extract_code_snippets,
         extract_error_info_from_log,
+        extract_log_error_events,
+        find_related_repository_code_usages,
         find_component_code_usages,
         find_knowledge_case,
+        GitCloneError,
+        group_log_error_events,
         insert_query_record,
         merge_code_snippets,
+        normalize_image_analysis,
         parse_issue_conclusion,
         resolve_file_paths,
         upsert_knowledge_case,
@@ -136,13 +334,23 @@ def analyze_log_task(self, data):
 
     task_id = self.request.id
     repo_path = None
+    repo_paths = []
     try:
         report_progress(self, "clone_repo_started", "代码拉取", 0, 25, "开始拉取代码 0%")
-        repo_path = clone_git_repo(
-            data.get("branchAddress"),
-            data.get("tagVersion"),
-            workspace_id=task_id,
-        )
+        repositories = build_analysis_repositories(data, task_id)
+        try:
+            cloned_repositories = clone_analysis_repositories(repositories, clone_git_repo, max_workers=4)
+        except GitCloneError as exc:
+            message = f"主模块代码拉取失败：{exc}"
+            report_progress(self, "clone_repo_failed", "代码拉取", 100, 45, message)
+            insert_query_record(data, 1, status="clone_repo_failed")
+            raise RuntimeError(message) from exc
+        for repository in cloned_repositories:
+            current_repo_path = repository.get("repo_path")
+            if repository.get("role") == "primary":
+                repo_path = current_repo_path
+            if current_repo_path:
+                repo_paths.append(current_repo_path)
         if not repo_path:
             report_progress(self, "clone_repo_failed", "代码拉取", 100, 45, "代码拉取失败")
             insert_query_record(data, 1)
@@ -164,12 +372,22 @@ def analyze_log_task(self, data):
                 insert_query_record(data, 1)
                 raise RuntimeError("图片文件路径无效或文件不存在")
             try:
-                image_analysis = analyze_uploaded_image(
-                    input_paths,
-                    data.get("image_tag"),
-                    data.get("image_description", ""),
+                log_content, image_ocr = build_image_ocr_log_content(data, input_paths)
+                extracted_text = image_ocr.get("extracted_text") or ""
+                image_analysis = normalize_image_analysis(
+                    str(data.get("image_tag") or "").strip(),
+                    {
+                        "summary": "本地 OCR 已识别图片文本" if extracted_text else "本地 OCR 未识别到文本，将使用原图继续分析",
+                        "extracted_text": extracted_text,
+                    },
+                    image_description=str(data.get("image_description") or "").strip(),
                 )
-                log_content = image_analysis.get("analysis_text") or ""
+                image_analysis.update({
+                    "ocr_engine": image_ocr.get("engine"),
+                    "ocr_available": image_ocr.get("available"),
+                    "ocr_average_confidence": image_ocr.get("average_confidence"),
+                    "ocr_warnings": image_ocr.get("warnings") or [],
+                })
                 components = merge_component_candidates(
                     image_analysis.get("components"),
                     image_analysis.get("candidate_apis"),
@@ -205,6 +423,14 @@ def analyze_log_task(self, data):
             components = detect_error_components(log_content)
 
         error_info = extract_error_info_from_log(log_content)
+        log_error_events = extract_log_error_events(log_content)
+        grouped_log_errors = group_log_error_events(log_error_events)
+        related_evidence_context, related_image_paths = build_related_evidence_context(data.get("relatedEvidence"))
+        skipped_chain_issue_context = build_skipped_chain_issue_context(data.get("skippedChainIssues"))
+        extra_context = "\n\n".join(
+            context for context in [related_evidence_context, skipped_chain_issue_context] if context
+        )
+        analysis_log_content = f"{log_content}\n\n{extra_context}" if extra_context else log_content
         error_fingerprint = build_error_fingerprint(
             data.get("productId"),
             data.get("moduleId"),
@@ -212,27 +438,56 @@ def analyze_log_task(self, data):
             data.get("branchAddress"),
             data.get("tagVersion"),
             fallback_text=log_content,
+            grouped_log_errors=grouped_log_errors,
+            related_modules=data.get("relatedModules"),
         )
         log_hash = hashlib.sha256(log_content.encode("utf-8")).hexdigest()
 
-        knowledge_case = find_knowledge_case(data.get("productId"), data.get("moduleId"), error_fingerprint)
+        knowledge_case = None
+        if should_use_knowledge_cache(source_type):
+            knowledge_case = find_knowledge_case(
+                data.get("productId"), data.get("moduleId"), error_fingerprint
+            )
         if knowledge_case:
             report_progress(self, "knowledge_hit", "知识库命中", 100, 95, "命中历史知识库 100%")
             payload = build_cached_analysis_payload(knowledge_case, task_id=task_id, repo_path=repo_path)
+            cached_code_evidence = build_analysis_evidence(
+                error_info=[],
+                resolved_errors=[],
+                code_snippets=payload.get("code_snippets") or [],
+                repositories=cloned_repositories,
+            )
+            payload["repositories"] = cloned_repositories
+            payload.setdefault("analysis_evidence", {}).update({
+                key: cached_code_evidence[key]
+                for key in (
+                    "used_code_context",
+                    "used_related_code_context",
+                    "related_code_module_count",
+                    "code_context_modules",
+                    "selected_code_repositories",
+                )
+            })
             insert_query_record(
                 data,
                 0,
                 status="cache_hit",
                 log_hash=log_hash,
                 error_fingerprint=error_fingerprint,
-                hit_cache=True,
-                knowledge_case_id=knowledge_case.id,
-            )
+            hit_cache=True,
+            knowledge_case_id=knowledge_case.id,
+        )
             report_progress(self, "completed", "任务完成", 100, 100, "全部阶段完成 100%")
             return payload
 
         report_progress(self, "analyze_log_started", "日志分析", 0, 70, "开始分析日志 0%")
-        log_analysis = analyze_log_with_deepseek(log_content)
+        try:
+            log_analysis = build_backend_log_analysis(analysis_log_content)
+            detected_languages = detect_log_languages(analysis_log_content)
+        except AiServiceError as exc:
+            report_progress(self, "ai_service_failed", "AI 服务", 100, 75, str(exc))
+            insert_query_record(data, 1, status="ai_service_failed", log_hash=log_hash, error_fingerprint=error_fingerprint)
+            raise RuntimeError(str(exc)) from exc
         if not log_analysis:
             report_progress(self, "analyze_log_failed", "日志分析", 100, 75, "日志分析失败")
             insert_query_record(data, 1, log_hash=log_hash, error_fingerprint=error_fingerprint)
@@ -241,11 +496,34 @@ def analyze_log_task(self, data):
 
         report_progress(self, "extract_code_started", "代码定位", 0, 85, "开始定位相关代码 0%")
         resolved_errors = resolve_file_paths(repo_path, error_info) if error_info else []
-        stack_snippets = extract_code_snippets(resolved_errors)
-        component_snippets = find_component_code_usages(repo_path, components)
-        code_snippets = merge_code_snippets(stack_snippets, component_snippets)
+        primary_repository = next(
+            (item for item in cloned_repositories if item.get("role") == "primary"),
+            {"role": "primary", "moduleName": "primary"},
+        )
+        stack_snippets = annotate_code_snippets(extract_code_snippets(resolved_errors), primary_repository)
+        component_groups = []
+        for repository in cloned_repositories:
+            if repository.get("role") == "primary":
+                snippets = find_component_code_usages(repository.get("repo_path"), components)
+            else:
+                snippets = find_related_repository_code_usages(
+                    repository.get("repo_path"),
+                    analysis_log_content,
+                    components,
+                )
+            component_groups.append(annotate_code_snippets(snippets, repository))
+        code_snippets = merge_code_snippets(stack_snippets, *component_groups)
         code_findings = build_code_findings(code_snippets)
-        analysis_evidence = build_analysis_evidence(error_info, resolved_errors, code_snippets)
+        analysis_evidence = build_analysis_evidence(
+            error_info,
+            resolved_errors,
+            code_snippets,
+            log_error_events,
+            grouped_log_errors=grouped_log_errors,
+            detected_languages=detected_languages,
+            ai_call_count=1,
+            repositories=cloned_repositories,
+        )
         report_progress(
             self,
             "extract_code_done",
@@ -255,18 +533,31 @@ def analyze_log_task(self, data):
             f"代码定位 100%，找到 {analysis_evidence['code_snippet_count']} 个代码片段",
         )
 
-        report_progress(self, "analyze_code_started", "综合分析", 0, 95, "开始综合分析 0%")
-        code_analysis = analyze_code_with_deepseek(
-            log_content,
-            log_analysis,
-            code_snippets,
-            image_analysis=image_analysis,
+        report_progress(
+            self,
+            "deep_reasoning_started",
+            "深度推理",
+            0,
+            95,
+            "正在使用 gpt-5.6-sol 进行深度故障推理，请耐心等待 0%",
         )
-        report_progress(self, "analyze_code_done", "综合分析", 100, 98, "综合分析 100%")
+        try:
+            code_analysis = analyze_code_with_deepseek(
+                analysis_log_content,
+                log_analysis,
+                code_snippets,
+                image_analysis=image_analysis,
+                image_paths=(input_paths if source_type == "image" else []) + related_image_paths,
+            )
+        except AiServiceError as exc:
+            report_progress(self, "ai_service_failed", "AI 服务", 100, 98, str(exc))
+            insert_query_record(data, 1, status="ai_service_failed", log_hash=log_hash, error_fingerprint=error_fingerprint)
+            raise RuntimeError(str(exc)) from exc
+        report_progress(self, "deep_reasoning_done", "深度推理", 100, 98, "深度故障推理 100%")
 
         issue_conclusion = parse_issue_conclusion(code_analysis)
         knowledge_case = None
-        if code_analysis:
+        if code_analysis and should_use_knowledge_cache(source_type):
             knowledge_case = upsert_knowledge_case(
                 data,
                 error_fingerprint,
@@ -291,6 +582,7 @@ def analyze_log_task(self, data):
         return {
             "task_id": task_id,
             "repo_path": repo_path,
+            "repositories": cloned_repositories,
             "knowledge_hit": False,
             "knowledge_case_id": knowledge_case.id if knowledge_case else None,
             "error_fingerprint": error_fingerprint,
@@ -308,5 +600,9 @@ def analyze_log_task(self, data):
         }
     finally:
         cleanup_result = cleanup_analysis_files(data, repo_path=repo_path, task_id=task_id)
+        for extra_repo_path in repo_paths:
+            if extra_repo_path == repo_path:
+                continue
+            cleanup_analysis_files(data, repo_path=extra_repo_path, task_id=task_id)
         if cleanup_result.get("uploaded_file_removed") or cleanup_result.get("repo_workspace_removed"):
             logging.info("分析临时文件清理完成：%s", cleanup_result)

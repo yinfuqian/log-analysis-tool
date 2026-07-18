@@ -1,3 +1,4 @@
+"""routes 模块负责本文件相关的业务流程、数据转换与依赖协作。"""
 from flask import Blueprint, jsonify
 from app.product.models.model import Product # 产品信息
 from app.branches.models.model  import Branch  # 分支数量
@@ -8,6 +9,7 @@ dashboard_bp = Blueprint('dashboard', __name__)
 @dashboard_bp.route('/get', methods=['GET'])
 def get_dashboard_data():
     # 获取上传的文件数量
+    """读取并返回 get_dashboard_data 对应的业务数据，保持现有调用约定。"""
     uploaded_files = Log.query.count()
     
     # 获取分析成功次数和分析失败次数

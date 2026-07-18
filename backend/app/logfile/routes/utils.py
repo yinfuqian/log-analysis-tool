@@ -1,3 +1,4 @@
+"""utils 模块负责本文件相关的业务流程、数据转换与依赖协作。"""
 from flask import current_app as app
 from app.utils.save_log_file import save_log_file
 import os
@@ -10,6 +11,7 @@ from app.branches.models.model import Branch
 
 # 获取产品名称
 def get_product_name_by_id(product_id):
+    """读取并返回 get_product_name_by_id 对应的业务数据，保持现有调用约定。"""
     try:
         product = Product.query.get(product_id)
         app.logger.debug(f"从数据库获取产品: {product.name if product else '无'}")  # 调试日志
@@ -21,6 +23,7 @@ def get_product_name_by_id(product_id):
 
 # 获取模块名称
 def get_module_name_by_id(module_id):
+    """读取并返回 get_module_name_by_id 对应的业务数据，保持现有调用约定。"""
     try:
         module = Module.query.get(module_id)
         app.logger.debug(f"从数据库获取模块: {module.name if module else '无'}")  # 调试日志
@@ -31,6 +34,7 @@ def get_module_name_by_id(module_id):
 
 # 根据 `address` 和 `tag_version` 查询分支信息
 def get_branch_address_by_name(address, tag_version):
+    """读取并返回 get_branch_address_by_name 对应的业务数据，保持现有调用约定。"""
     try:
         app.logger.debug(f"查询分支信息: address={address}, tag_version={tag_version}")  # 调试日志
         branch = Branch.query.filter_by(address=address, tag_version=tag_version).first()
@@ -59,6 +63,7 @@ def process_log_file(log_lines):
     return processed_lines
 
 def remove_duplicates(lines):
+    """清理 remove_duplicates 对应的业务数据，保持现有调用约定。"""
     seen = set()  # 使用集合来记录已出现过的日志
     unique_lines = []
     for line in lines:
@@ -94,6 +99,7 @@ def save_processed_log_file(lines, filename):
 
 
 def save_binary_upload_file(file_bytes, filename):
+    """保存 save_binary_upload_file 对应的业务数据，保持现有调用约定。"""
     save_dir = app.config.get('LOCAL_STORAGE_DIR', '/data/upload')
     os.makedirs(save_dir, exist_ok=True)
     save_path = os.path.join(save_dir, filename)
@@ -103,10 +109,12 @@ def save_binary_upload_file(file_bytes, filename):
     return save_path
 
 def sanitize_filename(filename):
+    """规范化并返回 sanitize_filename 对应的业务数据，保持现有调用约定。"""
     filename = re.sub(r'[\/:*?"<>|]', '_', filename)  # 替换非法字符
     return filename
 
 def extract_error_logs(log_lines):
+    """解析或提取并返回 extract_error_logs 对应的业务数据，保持现有调用约定。"""
     error_logs = []
     for line in log_lines:
         if isinstance(line, bytes):

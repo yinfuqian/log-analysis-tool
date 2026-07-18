@@ -1,4 +1,5 @@
 #!/bin/bash
+# migrate db 脚本负责后端或客户端的启动、构建与运行环境准备。
 set -e
 
 export FLASK_APP=app.py

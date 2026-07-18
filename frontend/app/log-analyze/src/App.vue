@@ -13,7 +13,7 @@
           <!-- 上传日志 -->
           <el-menu-item index="/upload">
             <el-icon><UploadFilled /></el-icon>
-            <span>上传日志</span>
+            <span>上传故障资料</span>
           </el-menu-item>
           <!-- 分析结果 -->
           <el-menu-item index="/analysisresult">
@@ -31,7 +31,7 @@
       <el-container>
         <!-- 头部导航栏 -->
         <el-header class="header">
-          <h3>日志分析系统</h3>
+          <h3>{{ productName }}</h3>
           <button data-test="logout" class="logout-button" type="button" @click="logout">
             退出登录
           </button>
@@ -51,6 +51,7 @@ import { HomeFilled, UploadFilled, Document } from '@element-plus/icons-vue';
 import { ElMessage } from 'element-plus';
 import apiClient from '@/api/client';
 import { clearToken } from '@/auth/session';
+import { PRODUCT_NAME } from '@/config/branding';
 
 export default {
   name: 'App',
@@ -58,6 +59,9 @@ export default {
     HomeFilled,
     UploadFilled,
     Document
+  },
+  data() {
+    return { productName: PRODUCT_NAME };
   },
   mounted() {
     window.addEventListener('auth:unauthorized', this.handleUnauthorized);

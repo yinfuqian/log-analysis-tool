@@ -1,3 +1,4 @@
+<!-- MarkdownViewer 页面组件负责界面展示、交互状态和后端数据联动。 -->
 // MarkdownViewer.vue
 <template>
   <div v-html="compiledMarkdown" class="markdown-body"></div>

@@ -1,8 +1,9 @@
+<!-- LoginView 页面组件负责界面展示、交互状态和后端数据联动。 -->
 <template>
   <main class="login-page">
     <form v-if="!requestMode" class="login-card" @submit.prevent="submitLogin">
-      <h1>日志分析系统</h1>
-      <p class="login-subtitle">请输入授权用户名和密码</p>
+      <h1>{{ productName }}</h1>
+      <p class="login-subtitle">{{ productSubtitle }}</p>
 
       <label for="login-username">用户名</label>
       <input id="login-username" v-model.trim="username" data-test="username" autocomplete="username" required />
@@ -39,12 +40,14 @@
 import apiClient from '@/api/client'
 import { requestAccount } from '@/api/accountRequests'
 import { setToken } from '@/auth/session'
+import { PRODUCT_NAME, PRODUCT_SUBTITLE } from '@/config/branding'
 import '@/assets/styles/login.css'
 
 export default {
   name: 'LoginView',
   data() {
     return {
+      productName: PRODUCT_NAME, productSubtitle: PRODUCT_SUBTITLE,
       username: '', password: '', submitting: false, errorMessage: '', requestMode: false,
       requestSubmitting: false, requestMessage: '', requestError: false,
       requestForm: { applicant_name: '', username: '', password: '' }

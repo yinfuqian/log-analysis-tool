@@ -1,3 +1,4 @@
+"""routes 模块负责本文件相关的业务流程、数据转换与依赖协作。"""
 import hashlib
 import os
 import subprocess
@@ -23,6 +24,7 @@ _repo_ref_locks_guard = threading.Lock()
 
 
 def build_authenticated_git_url(repo_url, username, password):
+    """构建并返回 build_authenticated_git_url 对应的业务数据，保持现有调用约定。"""
     parsed = urlparse(repo_url)
     if parsed.scheme not in ("http", "https"):
         return repo_url
@@ -37,6 +39,7 @@ def build_authenticated_git_url(repo_url, username, password):
 
 
 def parse_ls_remote_heads(output):
+    """解析或提取并返回 parse_ls_remote_heads 对应的业务数据，保持现有调用约定。"""
     branches = []
     for line in output.splitlines():
         if "\trefs/heads/" not in line:
@@ -49,6 +52,7 @@ def parse_ls_remote_heads(output):
 
 
 def parse_ls_remote_refs(output):
+    """解析或提取并返回 parse_ls_remote_refs 对应的业务数据，保持现有调用约定。"""
     branches = []
     tags = []
 
@@ -78,6 +82,7 @@ def parse_ls_remote_refs(output):
 
 
 def normalize_cached_refs(rows):
+    """规范化并返回 normalize_cached_refs 对应的业务数据，保持现有调用约定。"""
     branches = []
     tags = []
     for row in rows or []:
@@ -98,11 +103,13 @@ def normalize_cached_refs(rows):
 
 
 def build_git_ref_key(repo_url, ref_type, ref_name):
+    """构建并返回 build_git_ref_key 对应的业务数据，保持现有调用约定。"""
     raw_key = "|".join([str(repo_url or ""), str(ref_type or ""), str(ref_name or "")])
     return hashlib.sha256(raw_key.encode("utf-8")).hexdigest()
 
 
 def get_repo_ref_lock(repo_url):
+    """读取并返回 get_repo_ref_lock 对应的业务数据，保持现有调用约定。"""
     lock_key = hashlib.sha256(str(repo_url or "").encode("utf-8")).hexdigest()
     with _repo_ref_locks_guard:
         lock = _repo_ref_locks.get(lock_key)
@@ -113,6 +120,7 @@ def get_repo_ref_lock(repo_url):
 
 
 def load_cached_refs(repo_url):
+    """读取并返回 load_cached_refs 对应的业务数据，保持现有调用约定。"""
     try:
         rows = (
             GitRef.query.filter_by(repo_url=repo_url)
@@ -128,6 +136,7 @@ def load_cached_refs(repo_url):
 
 
 def save_refs_to_cache(repo_url, refs):
+    """保存 save_refs_to_cache 对应的业务数据，保持现有调用约定。"""
     max_attempts = 3
     for attempt in range(1, max_attempts + 1):
         try:
@@ -146,6 +155,7 @@ def save_refs_to_cache(repo_url, refs):
 
 
 def _save_refs_to_cache_once(repo_url, refs):
+    """保存 _save_refs_to_cache_once 对应的业务数据，保持现有调用约定。"""
     now = datetime.utcnow()
     expected = {}
     for ref_type, values in (("branch", refs.get("branches", [])), ("tag", refs.get("tags", []))):
@@ -186,6 +196,7 @@ def _save_refs_to_cache_once(repo_url, refs):
 
 
 def is_retryable_cache_write_error(exc):
+    """判断 is_retryable_cache_write_error 对应的业务数据，保持现有调用约定。"""
     original = getattr(exc, "orig", exc)
     error_code = None
     if getattr(original, "args", None):
@@ -194,10 +205,12 @@ def is_retryable_cache_write_error(exc):
 
 
 def list_remote_branches(repo_url, username=None, password=None, timeout=30):
+    """处理 list_remote_branches 对应的业务步骤，并向调用方返回所需结果。"""
     return list_remote_refs(repo_url, username=username, password=password, timeout=timeout)["branches"]
 
 
 def list_remote_refs(repo_url, username=None, password=None, timeout=30):
+    """处理 list_remote_refs 对应的业务步骤，并向调用方返回所需结果。"""
     authenticated_url = build_authenticated_git_url(repo_url, username, password)
     env = os.environ.copy()
     env["GIT_TERMINAL_PROMPT"] = "0"
@@ -215,6 +228,7 @@ def list_remote_refs(repo_url, username=None, password=None, timeout=30):
 
 
 def acquire_sync_lock(timeout=0):
+    """处理 acquire_sync_lock 对应的业务步骤，并向调用方返回所需结果。"""
     bind = db.session.get_bind()
     dialect_name = getattr(getattr(bind, "dialect", None), "name", "")
 
@@ -235,6 +249,7 @@ def acquire_sync_lock(timeout=0):
 
 
 def release_sync_lock(lock_token):
+    """处理 release_sync_lock 对应的业务步骤，并向调用方返回所需结果。"""
     try:
         if hasattr(lock_token, "execute"):
             lock_token.execute(
@@ -252,14 +267,25 @@ def release_sync_lock(lock_token):
 
 @git_bp.route("/branches", methods=["GET"])
 def get_remote_branches():
+    """读取并返回 get_remote_branches 对应的业务数据，保持现有调用约定。"""
     repo_url = request.args.get("repo_url", "").strip()
     if not repo_url:
         return jsonify({"error": "缺少 repo_url 参数"}), 400
 
     refresh = request.args.get("refresh", "").strip().lower() in {"1", "true", "yes"}
+    cached_only = request.args.get("cached_only", "").strip().lower() in {"1", "true", "yes"}
     cached_refs = load_cached_refs(repo_url)
     if cached_refs and not refresh:
-        return jsonify({"repo_url": repo_url, "source": "database", **cached_refs}), 200
+        return jsonify({"repo_url": repo_url, "source": "database", "cached": True, **cached_refs}), 200
+    if cached_only:
+        return jsonify({
+            "repo_url": repo_url,
+            "source": "database",
+            "cached": False,
+            "branches": [],
+            "tags": [],
+            "versions": [],
+        }), 200
 
     with get_repo_ref_lock(repo_url):
         cached_refs = load_cached_refs(repo_url)
@@ -289,6 +315,7 @@ def get_remote_branches():
 
 @git_bp.route("/sync-projects", methods=["POST"])
 def sync_gitlab_projects():
+    """更新 sync_gitlab_projects 对应的业务数据，保持现有调用约定。"""
     lock_token = acquire_sync_lock()
     if not lock_token:
         return jsonify({

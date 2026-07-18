@@ -1,9 +1,11 @@
+"""models 模块负责本文件相关的业务流程、数据转换与依赖协作。"""
 from datetime import datetime
 
 from extensions import db
 
 
 class UserOperationLog(db.Model):
+    """UserOperationLog 类封装该领域对象的状态、依赖与相关行为。"""
     __tablename__ = "user_operation_logs"
 
     id = db.Column(db.Integer, primary_key=True, autoincrement=True)

@@ -1,3 +1,4 @@
+<!-- AnalysisResult 页面组件负责界面展示、交互状态和后端数据联动。 -->
 <template>
   <div class="analysis-result">
     <h2>{{ currentStatus }}</h2>
@@ -5,7 +6,7 @@
 
     <div v-if="analysisComplete" class="result">
       <h3>分析完成</h3>
-      <p>日志分析结果：</p>
+      <p>故障分析结果：</p>
       <markdown-viewer :content="parsedLog" />
       <markdown-viewer :content="parsedCode" class="mt-4" />
 

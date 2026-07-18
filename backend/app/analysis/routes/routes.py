@@ -1,15 +1,21 @@
+"""routes 模块负责本文件相关的业务流程、数据转换与依赖协作。"""
 import base64
 import hashlib
 import json
 import os
 import re,subprocess
 import logging
+import shutil
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from flask import Blueprint, request, jsonify, current_app as app
 from openai import OpenAI
 from celery.result import AsyncResult
 from extensions import celery
+from app.ai_options import build_ai_request_options
 from app.analysis.routes.tasks import analyze_log_task
-from app.logfile.models.model import AnalysisKnowledgeCase, QueryRecord
+from app.analysis.routes.language_adapters import detect_log_languages, extract_source_locations
+from app.logfile.models.model import AnalysisKnowledgeCase, Log, QueryRecord
+from app.uploads.references import AnalysisInputError, resolve_analysis_inputs
 from datetime import datetime
 from extensions import db
 
@@ -40,7 +46,78 @@ DEFAULT_POSSIBLE_CAUSE = {
 }
 
 
+class AiServiceError(RuntimeError):
+    """AiServiceError 类封装该领域对象的状态、依赖与相关行为。"""
+    def __init__(self, message, status_code=None, error_type=None):
+        """初始化当前对象的依赖、界面状态或运行参数。"""
+        super().__init__(message)
+        self.status_code = status_code
+        self.error_type = error_type
+
+
+class GitCloneError(RuntimeError):
+    """GitCloneError 类封装该领域对象的状态、依赖与相关行为。"""
+    pass
+
+
+def _decode_process_output(value):
+    """解析或提取并返回 _decode_process_output 对应的业务数据，保持现有调用约定。"""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return str(value or "")
+
+
+def _sanitize_git_error(value):
+    """规范化并返回 _sanitize_git_error 对应的业务数据，保持现有调用约定。"""
+    message = _decode_process_output(value).strip()
+    return re.sub(r"(https?://)[^/@\s]+(?::[^/@\s]*)?@", r"\1***@", message)
+
+
+def _build_git_clone_error(address, tag_version, exc):
+    """构建并返回 _build_git_clone_error 对应的业务数据，保持现有调用约定。"""
+    stderr = _sanitize_git_error(getattr(exc, "stderr", ""))
+    detail = stderr.splitlines()[-1].strip() if stderr else "Git 返回状态码 128"
+    lowered = detail.lower()
+    repo_name = str(address or "").rstrip("/").split("/")[-1].removesuffix(".git")
+    if "remote branch" in lowered and "not found" in lowered:
+        return GitCloneError(f"仓库 {repo_name} 中不存在分支/Tag {tag_version}")
+    if any(signal in lowered for signal in ("repository not found", "authentication failed", "access denied", "403")):
+        return GitCloneError(f"仓库 {repo_name} 不存在或当前 Git 账号无权限")
+    return GitCloneError(f"仓库 {repo_name} 拉取失败（分支/Tag: {tag_version}）：{detail}")
+
+
+def normalize_ai_exception(exc):
+    """规范化并返回 normalize_ai_exception 对应的业务数据，保持现有调用约定。"""
+    status_code = getattr(exc, "status_code", None)
+    response = getattr(exc, "response", None)
+    if status_code is None and response is not None:
+        status_code = getattr(response, "status_code", None)
+    error_text = str(exc or "")
+    error_type = ""
+    try:
+        body = response.json() if response is not None and hasattr(response, "json") else None
+    except Exception:
+        body = None
+    if isinstance(body, dict):
+        error_payload = body.get("error") if isinstance(body.get("error"), dict) else body
+        error_type = str(error_payload.get("type") or error_payload.get("code") or "")
+        error_text = str(error_payload.get("message") or error_text)
+    lowered = f"{error_type} {error_text}".lower()
+    if status_code == 429 or "usage_limit_reached" in lowered or "usage limit has been reached" in lowered:
+        return AiServiceError(
+            "AI 服务调用失败：额度已用尽或触发限流，请更换可用 Key、提升额度，或稍后重试。",
+            status_code=429,
+            error_type=error_type or "usage_limit_reached",
+        )
+    return AiServiceError(
+        f"AI 服务调用失败：{error_text}",
+        status_code=status_code,
+        error_type=error_type,
+    )
+
+
 def normalize_command_list(value):
+    """规范化并返回 normalize_command_list 对应的业务数据，保持现有调用约定。"""
     if isinstance(value, str):
         items = [value]
     elif isinstance(value, list):
@@ -79,10 +156,54 @@ COMPONENT_USAGE_PATTERNS = {
     ],
 }
 
+CHAIN_RELEVANCE_PATTERNS = [
+    r"https?://[^\s,\"]+",
+    r"\bhttp\s*(?:status|code)?\s*[=:]?\s*[45]\d\d\b",
+    r"\b(?:status|code)\s*[=:]\s*[45]\d\d\b",
+    r"\b(?:feign|dubbo|grpc|rpc|httpclient|resttemplate|webclient|okhttp|requests|httpx)\b",
+    r"\b(?:timeout|timed\s*out|connection\s*reset|connection\s*refused|broken\s*pipe)\b",
+    r"\b(?:callback|webhook|notify|notification)\b",
+    r"(?:调用|请求|回调|通知).{0,20}(?:失败|异常|超时|错误)",
+    r"(?:上游|下游|第三方|外部服务|远程服务).{0,20}(?:失败|异常|超时|错误|返回)",
+    r"(?:response|响应|返回).{0,20}(?:error|failed|失败|异常|错误|为空|null)",
+]
+
+LOCAL_ONLY_PATTERNS = [
+    r"\b(?:NullPointerException|IndexOutOfBoundsException|ClassCastException|IllegalArgumentException)\b",
+    r"\b(?:ZeroDivisionError|TypeError|ValueError|KeyError|AttributeError)\b",
+    r"\bpanic:\s*runtime error\b",
+]
+
+RELATED_CODE_SIGNAL_PATTERNS = [
+    "http",
+    "https",
+    "feign",
+    "dubbo",
+    "grpc",
+    "rpc",
+    "resttemplate",
+    "webclient",
+    "okhttp",
+    "requests",
+    "httpx",
+    "callback",
+    "webhook",
+    "notify",
+    "timeout",
+    "status",
+    "response",
+    "return",
+]
+
 SOURCE_CODE_SUFFIXES = {
     ".java",
     ".kt",
     ".groovy",
+    ".py",
+    ".go",
+    ".sh",
+    ".bash",
+    ".zsh",
     ".xml",
     ".yml",
     ".yaml",
@@ -171,18 +292,32 @@ def clone_git_repo(address, tag_version, workspace_id=None):
         logging.info("Git \u4ed3\u5e93\u514b\u9686\u6210\u529f\uff1arepo_dir=%s", repo_dir)
         return repo_dir
     except subprocess.CalledProcessError as e:
-        logging.error("Git \u514b\u9686\u5931\u8d25\uff1arepo=%s, version=%s, error=%s", address, tag_version, e)
-        return None
+        clone_error = _build_git_clone_error(address, tag_version, e)
+        logging.error("Git clone failed: repo=%s, version=%s, reason=%s", address, tag_version, clone_error)
+        if os.path.isdir(repo_dir):
+            shutil.rmtree(repo_dir, ignore_errors=True)
+        raise clone_error from e
 
 
 @analysis_bp.route("/submit_async", methods=["POST"])
 def submit_async_analysis():
+    """提交 submit_async_analysis 对应的业务数据，保持现有调用约定。"""
     data = request.json or {}
     source_type = str(data.get("source_type") or "file").lower()
     if source_type == "image" and not data.get("image_tag"):
         return jsonify({"error": "\u7f3a\u5c11\u5fc5\u8981\u5b57\u6bb5", "missing_fields": ["image_tag"]}), 400
-    if source_type == "image" and data.get("file_paths") and not data.get("file_path"):
-        data["file_path"] = data.get("file_paths")[0]
+
+    def lookup_log(reference):
+        """查找或推断并返回 lookup_log 对应的业务数据，保持现有调用约定。"""
+        if isinstance(reference, int) or str(reference).isdigit():
+            return db.session.get(Log, int(reference))
+        return Log.query.filter_by(log_file_path=str(reference)).first()
+
+    try:
+        resolve_analysis_inputs(data, app.config.get("LOCAL_STORAGE_DIR", "/data/upload"), lookup_log)
+    except AnalysisInputError as exc:
+        return jsonify({"error": str(exc)}), 400
+
     required_fields = ["productId", "moduleId", "branchAddress", "tagVersion", "file_path"]
     missing_fields = [field for field in required_fields if not data.get(field)]
     if missing_fields:
@@ -198,6 +333,7 @@ def submit_async_analysis():
 
 @analysis_bp.route("/task/<task_id>", methods=["GET"])
 def get_analysis_task(task_id):
+    """读取并返回 get_analysis_task 对应的业务数据，保持现有调用约定。"""
     task = AsyncResult(task_id, app=celery)
     payload = {
         "task_id": task_id,
@@ -220,6 +356,7 @@ def get_analysis_task(task_id):
 
 @analysis_bp.route("/task/<task_id>/cancel", methods=["POST"])
 def cancel_analysis_task(task_id):
+    """取消 cancel_analysis_task 对应的业务数据，保持现有调用约定。"""
     celery.control.revoke(task_id, terminate=True, signal="SIGTERM")
     return jsonify({
         "task_id": task_id,
@@ -229,6 +366,7 @@ def cancel_analysis_task(task_id):
 
 @analysis_bp.route("/log_analysis", methods=["POST"])
 def analyze_log_and_code():
+    """执行故障分析并返回 analyze_log_and_code 对应的业务数据，保持现有调用约定。"""
     logging.info("==> \u8fdb\u5165 analyze_log_and_code")
     data = request.json
     logging.info("\u6536\u5230\u540c\u6b65\u5206\u6790\u8bf7\u6c42\uff1a%s", data)
@@ -254,7 +392,11 @@ def analyze_log_and_code():
         return jsonify({"error": "\u8bfb\u53d6\u65e5\u5fd7\u5931\u8d25"}), 500
 
     logging.info("\u5f00\u59cb\u6267\u884c\u65e5\u5fd7\u521d\u6b65\u5206\u6790")
-    log_analysis = analyze_log_with_deepseek(log_content)
+    try:
+        log_analysis = build_backend_log_analysis(log_content)
+    except AiServiceError as exc:
+        insert_query_record(data, 1, status="ai_service_failed")
+        return jsonify({"error": str(exc), "error_type": exc.error_type}), exc.status_code or 500
     if not log_analysis:
         logging.error("\u65e5\u5fd7\u521d\u6b65\u5206\u6790\u8fd4\u56de\u4e3a\u7a7a")
         insert_query_record(data, 1)
@@ -286,7 +428,11 @@ def analyze_log_and_code():
     )
 
     logging.info("\u5f00\u59cb\u6267\u884c\u4ee3\u7801\u4e0e\u65e5\u5fd7\u7684\u7efc\u5408\u5206\u6790")
-    code_analysis = analyze_code_with_deepseek(log_content, log_analysis, code_snippets)
+    try:
+        code_analysis = analyze_code_with_deepseek(log_content, log_analysis, code_snippets)
+    except AiServiceError as exc:
+        insert_query_record(data, 1, status="ai_service_failed")
+        return jsonify({"error": str(exc), "error_type": exc.error_type}), exc.status_code or 500
     if code_analysis:
         insert_query_record(data, 0)
         logging.info("\u7efc\u5408\u5206\u6790\u6210\u529f")
@@ -304,6 +450,7 @@ def analyze_log_and_code():
 
 
 def normalize_error_message(message):
+    """规范化并返回 normalize_error_message 对应的业务数据，保持现有调用约定。"""
     text = str(message or "").lower()
     text = re.sub(r"\d{4}-\d{2}-\d{2}[ t]\d{2}:\d{2}:\d{2}(?:[.,]\d+)?", "<timestamp>", text)
     text = re.sub(r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b", "<uuid>", text)
@@ -313,7 +460,17 @@ def normalize_error_message(message):
     return text
 
 
-def build_error_fingerprint(product_id, module_id, error_info, branch_url=None, branch_version=None, fallback_text=None):
+def build_error_fingerprint(
+    product_id,
+    module_id,
+    error_info,
+    branch_url=None,
+    branch_version=None,
+    fallback_text=None,
+    grouped_log_errors=None,
+    related_modules=None,
+):
+    """构建并返回 build_error_fingerprint 对应的业务数据，保持现有调用约定。"""
     first_error = (error_info or [{}])[0] or {}
     raw_error = first_error.get("error") or ""
     if not raw_error and fallback_text:
@@ -321,7 +478,29 @@ def build_error_fingerprint(product_id, module_id, error_info, branch_url=None, 
     error_type = extract_error_type(raw_error)
     normalized_message = normalize_error_message(raw_error)
     file_name = first_error.get("file") or ""
+    group_signatures = sorted({
+        str(group.get("signature") or "")
+        for group in (grouped_log_errors or [])
+        if isinstance(group, dict) and group.get("signature")
+    })
+    related_repository_versions = sorted(
+        (
+            str(module.get("role") or "related"),
+            str(module.get("moduleName") or module.get("moduleId") or ""),
+            str(module.get("branchAddress") or ""),
+            str(module.get("tagVersion") or ""),
+        )
+        for module in (related_modules or [])
+        if isinstance(module, dict)
+        and module.get("branchAddress")
+        and module.get("tagVersion")
+    )
     seed = "|".join([
+        (
+            "grouped-errors-v3-related"
+            if related_repository_versions
+            else ("grouped-errors-v2" if group_signatures else "legacy-error-v1")
+        ),
         str(product_id or ""),
         str(module_id or ""),
         str(branch_url or ""),
@@ -329,16 +508,20 @@ def build_error_fingerprint(product_id, module_id, error_info, branch_url=None, 
         str(error_type or ""),
         str(file_name or ""),
         normalized_message,
+        safe_json_dumps(group_signatures),
+        safe_json_dumps(related_repository_versions),
     ])
     return hashlib.sha256(seed.encode("utf-8")).hexdigest()
 
 
 def extract_error_type(error_message):
+    """解析或提取并返回 extract_error_type 对应的业务数据，保持现有调用约定。"""
     match = re.search(r"([A-Za-z_][\w\.]*(?:Exception|Error))", str(error_message or ""))
     return match.group(1) if match else None
 
 
 def clamp_confidence(value):
+    """规范化并返回 clamp_confidence 对应的业务数据，保持现有调用约定。"""
     try:
         confidence = float(value or 0)
     except (TypeError, ValueError):
@@ -347,6 +530,7 @@ def clamp_confidence(value):
 
 
 def normalize_possible_causes(value):
+    """规范化并返回 normalize_possible_causes 对应的业务数据，保持现有调用约定。"""
     normalized = {}
     source = value if isinstance(value, dict) else {}
     for key in POSSIBLE_CAUSE_KEYS:
@@ -359,7 +543,75 @@ def normalize_possible_causes(value):
     return normalized
 
 
+def normalize_code_locations(value):
+    """规范化并返回 normalize_code_locations 对应的业务数据，保持现有调用约定。"""
+    if not isinstance(value, list):
+        return []
+    locations = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        file_path = str(item.get("file") or item.get("file_path") or "").strip()
+        line = item.get("line")
+        try:
+            line = int(line) if line not in (None, "") else None
+        except (TypeError, ValueError):
+            line = None
+        if not file_path and line is None:
+            continue
+        locations.append({
+            "file": file_path,
+            "line": line,
+            "reason": str(item.get("reason") or "").strip(),
+        })
+    return locations
+
+
+def normalize_issue_items(value):
+    """规范化并返回 normalize_issue_items 对应的业务数据，保持现有调用约定。"""
+    if not isinstance(value, list):
+        return []
+    issues = []
+    for index, item in enumerate(value, start=1):
+        if not isinstance(item, dict):
+            continue
+        issue_category = item.get("issue_category") or item.get("category") or "unknown"
+        if issue_category not in ISSUE_CATEGORY_LABELS:
+            issue_category = "unknown"
+        evidence = item.get("evidence") or []
+        if isinstance(evidence, str):
+            evidence = [evidence]
+        elif not isinstance(evidence, list):
+            evidence = []
+        query_commands = (
+            item.get("query_commands")
+            or item.get("query_command")
+            or item.get("query_commond")
+        )
+        fix_commands = (
+            item.get("fix_commands")
+            or item.get("fix_command")
+            or item.get("fix_commond")
+        )
+        issues.append({
+            "index": index,
+            "title": str(item.get("title") or item.get("issue_title") or f"问题{index}").strip(),
+            "issue_category": issue_category,
+            "issue_category_label": ISSUE_CATEGORY_LABELS[issue_category],
+            "summary": str(item.get("summary") or item.get("conclusion_summary") or "").strip(),
+            "root_cause": str(item.get("root_cause") or "").strip(),
+            "solution": str(item.get("solution") or "").strip(),
+            "confidence": clamp_confidence(item.get("confidence")),
+            "evidence": [str(entry) for entry in evidence if str(entry).strip()],
+            "query_commands": normalize_command_list(query_commands),
+            "fix_commands": normalize_command_list(fix_commands),
+            "code_locations": normalize_code_locations(item.get("code_locations") or item.get("code_snippets")),
+        })
+    return issues
+
+
 def parse_issue_conclusion(ai_text):
+    """解析或提取并返回 parse_issue_conclusion 对应的业务数据，保持现有调用约定。"""
     raw_text = str(ai_text or "").strip()
     payload = extract_json_object(raw_text)
     if not isinstance(payload, dict):
@@ -374,6 +626,8 @@ def parse_issue_conclusion(ai_text):
             "query_commands": [],
             "fix_commands": [],
             "evidence": [],
+            "issues": [],
+            "issue_count": 0,
             "raw_analysis": raw_text,
         }
 
@@ -386,6 +640,36 @@ def parse_issue_conclusion(ai_text):
         evidence = [evidence]
     elif not isinstance(evidence, list):
         evidence = []
+    issue_items = (
+        payload.get("issues")
+        or payload.get("issue_details")
+        or payload.get("problem_details")
+        or payload.get("problems")
+    )
+    top_level_query_commands = (
+        payload.get("query_commands")
+        or payload.get("query_command")
+        or payload.get("query_commond")
+    )
+    top_level_fix_commands = (
+        payload.get("fix_commands")
+        or payload.get("fix_command")
+        or payload.get("fix_commond")
+    )
+    issues = normalize_issue_items(issue_items)
+    if not issues and any(payload.get(key) for key in ("conclusion_summary", "root_cause", "solution", "evidence")):
+        issues = normalize_issue_items([{
+            "title": payload.get("conclusion_summary") or "综合问题",
+            "issue_category": issue_category,
+            "summary": payload.get("conclusion_summary"),
+            "root_cause": payload.get("root_cause"),
+            "solution": payload.get("solution"),
+            "confidence": confidence,
+            "evidence": evidence,
+            "query_commands": top_level_query_commands,
+            "fix_commands": top_level_fix_commands,
+            "code_locations": payload.get("code_locations"),
+        }])
 
     return {
         "issue_category": issue_category,
@@ -395,14 +679,17 @@ def parse_issue_conclusion(ai_text):
         "solution": str(payload.get("solution") or "").strip(),
         "confidence": confidence,
         "possible_causes": normalize_possible_causes(payload.get("possible_causes")),
-        "query_commands": normalize_command_list(payload.get("query_commands")),
-        "fix_commands": normalize_command_list(payload.get("fix_commands")),
+        "query_commands": normalize_command_list(top_level_query_commands),
+        "fix_commands": normalize_command_list(top_level_fix_commands),
         "evidence": [str(item) for item in evidence],
+        "issues": issues,
+        "issue_count": len(issues),
         "raw_analysis": raw_text,
     }
 
 
 def extract_json_object(text):
+    """解析或提取并返回 extract_json_object 对应的业务数据，保持现有调用约定。"""
     cleaned = re.sub(r"^\s*```(?:json)?\s*", "", text.strip(), flags=re.IGNORECASE)
     cleaned = re.sub(r"\s*```\s*$", "", cleaned)
     candidates = [cleaned]
@@ -418,6 +705,7 @@ def extract_json_object(text):
 
 
 def find_knowledge_case(product_id, module_id, error_fingerprint):
+    """查找或推断并返回 find_knowledge_case 对应的业务数据，保持现有调用约定。"""
     if not all([product_id, module_id, error_fingerprint]):
         return None
     return AnalysisKnowledgeCase.query.filter_by(
@@ -428,6 +716,7 @@ def find_knowledge_case(product_id, module_id, error_fingerprint):
 
 
 def build_cached_analysis_payload(case, task_id=None, repo_path=None):
+    """构建并返回 build_cached_analysis_payload 对应的业务数据，保持现有调用约定。"""
     case.hit_count = (case.hit_count or 0) + 1
     case.last_hit_at = datetime.utcnow()
     db.session.commit()
@@ -436,6 +725,7 @@ def build_cached_analysis_payload(case, task_id=None, repo_path=None):
     code_findings = build_code_findings(code_snippets)
     evidence = safe_json_loads(case.evidence, [])
     cached_payload = extract_json_object(case.ai_analysis or "") or {}
+    cached_issues = normalize_issue_items(cached_payload.get("issues"))
     issue_conclusion = {
         "issue_category": case.issue_category,
         "issue_category_label": ISSUE_CATEGORY_LABELS.get(case.issue_category, ISSUE_CATEGORY_LABELS["unknown"]),
@@ -447,6 +737,8 @@ def build_cached_analysis_payload(case, task_id=None, repo_path=None):
         "query_commands": normalize_command_list(cached_payload.get("query_commands")),
         "fix_commands": normalize_command_list(cached_payload.get("fix_commands")),
         "evidence": evidence,
+        "issues": cached_issues,
+        "issue_count": len(cached_issues),
         "raw_analysis": case.ai_analysis or "",
     }
     return {
@@ -461,6 +753,7 @@ def build_cached_analysis_payload(case, task_id=None, repo_path=None):
         "code_findings": code_findings,
         "analysis_evidence": {
             "used_code_context": bool(code_snippets),
+            "log_error_event_count": len(cached_issues) or (1 if case.error_message else 0),
             "error_info_count": 1 if case.error_message else 0,
             "resolved_file_count": len(safe_json_loads(case.code_files, [])),
             "code_snippet_count": len(code_snippets),
@@ -472,10 +765,12 @@ def build_cached_analysis_payload(case, task_id=None, repo_path=None):
 
 
 def safe_json_dumps(value):
+    """处理 safe_json_dumps 对应的业务步骤，并向调用方返回所需结果。"""
     return json.dumps(value if value is not None else [], ensure_ascii=False)
 
 
 def safe_json_loads(value, default):
+    """处理 safe_json_loads 对应的业务步骤，并向调用方返回所需结果。"""
     if not value:
         return default
     try:
@@ -485,6 +780,7 @@ def safe_json_loads(value, default):
 
 
 def upsert_knowledge_case(data, error_fingerprint, error_info, log_content, code_snippets, code_analysis, issue_conclusion):
+    """处理 upsert_knowledge_case 对应的业务步骤，并向调用方返回所需结果。"""
     if not error_fingerprint or not code_analysis:
         return None
     product_id = int(data.get("productId"))
@@ -527,6 +823,7 @@ def upsert_knowledge_case(data, error_fingerprint, error_info, log_content, code
 
 
 def get_int_config(name, default):
+    """读取并返回 get_int_config 对应的业务数据，保持现有调用约定。"""
     try:
         return int(app.config.get(name, default))
     except (TypeError, ValueError):
@@ -534,12 +831,14 @@ def get_int_config(name, default):
 
 
 def get_error_context_settings():
+    """读取并返回 get_error_context_settings 对应的业务数据，保持现有调用约定。"""
     context_lines = get_int_config("LOG_ERROR_CONTEXT_LINES", LOG_ERROR_CONTEXT_LINES)
     max_chars = get_int_config("LOG_CONTEXT_MAX_CHARS", LOG_CONTEXT_MAX_CHARS)
     return max(0, context_lines), max(1000, max_chars)
 
 
 def extract_relevant_log_context(log_content, context_lines=None, max_chars=None):
+    """解析或提取并返回 extract_relevant_log_context 对应的业务数据，保持现有调用约定。"""
     text = str(log_content or "")
     if not text:
         return ""
@@ -586,7 +885,9 @@ def extract_relevant_log_context(log_content, context_lines=None, max_chars=None
     excerpt_lines = []
     current_len = 0
     previous_index = None
-    for index in sorted(selected_indexes):
+    sorted_indexes = sorted(selected_indexes)
+    truncated = False
+    for index in sorted_indexes:
         if previous_index is not None and index > previous_index + 1:
             separator = f"... skipped {index - previous_index - 1} lines ..."
             if current_len + len(separator) + 1 <= max_chars:
@@ -595,27 +896,308 @@ def extract_relevant_log_context(log_content, context_lines=None, max_chars=None
         numbered_line = f"{index + 1}: {lines[index]}"
         if current_len + len(numbered_line) + 1 > max_chars and excerpt_lines:
             excerpt_lines.append("... truncated by LOG_CONTEXT_MAX_CHARS ...")
+            truncated = True
             break
         excerpt_lines.append(numbered_line)
         current_len += len(numbered_line) + 1
         previous_index = index
 
+    if truncated:
+        return build_head_tail_log_context(lines, sorted_indexes, max_chars)
+
     return "\n".join(excerpt_lines)
 
 
+def build_head_tail_log_context(lines, sorted_indexes, max_chars):
+    """构建并返回 build_head_tail_log_context 对应的业务数据，保持现有调用约定。"""
+    marker = "... truncated middle by LOG_CONTEXT_MAX_CHARS; preserved first and last error batches ..."
+    half_budget = max(200, (max_chars - len(marker) - 2) // 2)
+    head = []
+    head_len = 0
+    for index in sorted_indexes:
+        numbered_line = f"{index + 1}: {lines[index]}"
+        if head and head_len + len(numbered_line) + 1 > half_budget:
+            break
+        head.append((index, numbered_line))
+        head_len += len(numbered_line) + 1
+
+    tail = []
+    tail_len = 0
+    used_head_indexes = {index for index, _ in head}
+    for index in reversed(sorted_indexes):
+        if index in used_head_indexes:
+            continue
+        numbered_line = f"{index + 1}: {lines[index]}"
+        if tail and tail_len + len(numbered_line) + 1 > half_budget:
+            break
+        tail.append((index, numbered_line))
+        tail_len += len(numbered_line) + 1
+    tail.reverse()
+
+    rendered = [line for _, line in head]
+    if tail:
+        rendered.append(marker)
+        rendered.extend(line for _, line in tail)
+    return "\n".join(rendered)
+
+
+def _is_log_record_start(line):
+    """判断 _is_log_record_start 对应的业务数据，保持现有调用约定。"""
+    return bool(re.match(r"^\s*\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}", line or ""))
+
+
+def _is_error_event_start(line):
+    """判断 _is_error_event_start 对应的业务数据，保持现有调用约定。"""
+    text = line or ""
+    stripped = text.strip()
+    if not stripped:
+        return False
+    if re.search(r"\b(ERROR|FATAL)\b", text):
+        return True
+    if re.match(r"^(Traceback \(most recent call last\)|panic:\s+)", stripped):
+        return True
+    return bool(re.match(r"^[A-Za-z_][\w.$]*(?:Exception|Error):\s*", stripped))
+
+
+def _is_error_event_continuation(line):
+    """判断 _is_error_event_continuation 对应的业务数据，保持现有调用约定。"""
+    text = line or ""
+    stripped = text.strip()
+    if not stripped:
+        return True
+    if re.match(r"^(at\s+[\w.$]+\(|Caused by:|\.\.\.\s+\d+\s+more|File\s+\")", stripped):
+        return True
+    if re.match(r"^[A-Za-z_][\w.$]*(?:Exception|Error):\s*", stripped):
+        return True
+    if re.match(r"^(message|reason|error|desc|url|queryString)\s*[:=]", stripped, re.IGNORECASE):
+        return True
+    if re.search(r"\b(rpc error|connection closed|timeout|reset by peer|refused|unavailable|nullpointer)\b", stripped, re.IGNORECASE):
+        return True
+    return False
+
+
+def _collect_log_error_event(lines, start, max_event_lines):
+    """处理 _collect_log_error_event 对应的业务步骤，并向调用方返回所需结果。"""
+    event_lines = [lines[start]]
+    cursor = start + 1
+    while cursor < len(lines) and len(event_lines) < max_event_lines:
+        next_line = lines[cursor]
+        if _is_log_record_start(next_line):
+            break
+        if _is_error_event_continuation(next_line) or event_lines:
+            event_lines.append(next_line)
+            cursor += 1
+            continue
+        break
+    return {
+        "line": start + 1,
+        "end_line": cursor,
+        "text": "\n".join(event_lines).strip(),
+    }
+
+
+def _is_success_recorded_as_error(event_text):
+    """判断 _is_success_recorded_as_error 对应的业务数据，保持现有调用约定。"""
+    text = str(event_text or "")
+    if re.search(r"(?:Exception|Error):|Traceback \(most recent call last\)|panic:\s+", text):
+        return False
+    return bool(re.search(
+        r"(?:打标结果为|(?:tagging\s+)?result\s*(?:is|=|:))[^\n]{0,80}message\s*[:=]\s*[\"']?success\b",
+        text,
+        re.IGNORECASE,
+    ))
+
+
+def extract_log_error_events(log_content, max_events=None, max_event_lines=80):
+    """解析或提取并返回 extract_log_error_events 对应的业务数据，保持现有调用约定。"""
+    text = str(log_content or "")
+    if not text:
+        return []
+
+    lines = text.splitlines()
+    events = []
+    consumed_until = -1
+    for index, line in enumerate(lines):
+        if max_events is not None and len(events) >= max_events:
+            break
+        if index <= consumed_until:
+            continue
+        if not _is_error_event_start(line):
+            continue
+
+        event = _collect_log_error_event(lines, index, max_event_lines)
+        if not event["text"]:
+            continue
+        if _is_success_recorded_as_error(event["text"]):
+            consumed_until = max(consumed_until, event["end_line"] - 1)
+            continue
+        events.append({
+            "line": event["line"],
+            "text": event["text"],
+        })
+        consumed_until = max(consumed_until, event["end_line"] - 1)
+        if max_events is not None and len(events) >= max_events:
+            break
+
+    return events
+
+
+def _normalize_log_event_signature_text(value):
+    """规范化并返回 _normalize_log_event_signature_text 对应的业务数据，保持现有调用约定。"""
+    text = str(value or "").lower()
+    text = re.sub(r"^\s*\d{4}-\d{2}-\d{2}[ t]\d{2}:\d{2}:\d{2}(?:[.,]\d+)?", "", text)
+    text = re.sub(r"\b[0-9a-f]{8}-[0-9a-f-]{27,}\b", "<uuid>", text)
+    text = re.sub(r"0x[0-9a-f]+", "<address>", text)
+    text = re.sub(r"\b\d+\b", "<n>", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def build_log_event_signature(event_text):
+    """构建并返回 build_log_event_signature 对应的业务数据，保持现有调用约定。"""
+    text = str(event_text or "")
+    exception_matches = re.findall(
+        r"(?m)^\s*([A-Za-z_][\w.$]*(?:Exception|Error)):\s*(.*)$",
+        text,
+    )
+    panic_match = re.search(r"(?mi)^\s*(panic):\s*(.*)$", text)
+    if exception_matches:
+        error_type, message = exception_matches[0]
+    elif panic_match:
+        error_type, message = panic_match.group(1), panic_match.group(2)
+    else:
+        first_line = next((line for line in text.splitlines() if line.strip()), "unknown error")
+        error_type, message = "log_error", first_line
+
+    locations = extract_source_locations(text)
+    first_location = locations[0] if locations else {}
+    location_key = ":".join(
+        str(value or "")
+        for value in [
+            first_location.get("language"),
+            first_location.get("file"),
+            first_location.get("line"),
+            first_location.get("symbol"),
+        ]
+    )
+    return "|".join([
+        _normalize_log_event_signature_text(error_type),
+        _normalize_log_event_signature_text(message),
+        _normalize_log_event_signature_text(location_key),
+    ])
+
+
+def group_log_error_events(events):
+    """合并整理并返回 group_log_error_events 对应的业务数据，保持现有调用约定。"""
+    groups = []
+    groups_by_signature = {}
+    for event in events or []:
+        event_text = str(event.get("text") or "")
+        signature = build_log_event_signature(event_text)
+        group = groups_by_signature.get(signature)
+        if group is None:
+            group = {
+                "signature": signature,
+                "first_line": event.get("line"),
+                "last_line": event.get("line"),
+                "occurrence_count": 0,
+                "occurrence_lines": [],
+                "representative_text": event_text,
+                "languages": detect_log_languages(event_text),
+            }
+            groups_by_signature[signature] = group
+            groups.append(group)
+        group["occurrence_count"] += 1
+        group["last_line"] = event.get("line")
+        if event.get("line") is not None:
+            group["occurrence_lines"].append(event.get("line"))
+    return groups
+
+
+def _truncate_group_evidence(text, max_chars):
+    """处理 _truncate_group_evidence 对应的业务步骤，并向调用方返回所需结果。"""
+    value = str(text or "")
+    if len(value) <= max_chars:
+        return value
+    marker = "\n... group context truncated ...\n"
+    available = max(40, max_chars - len(marker))
+    head_chars = available * 2 // 3
+    tail_chars = available - head_chars
+    return f"{value[:head_chars]}{marker}{value[-tail_chars:]}"
+
+
+def build_backend_log_analysis(log_content, max_chars=None):
+    """构建并返回 build_backend_log_analysis 对应的业务数据，保持现有调用约定。"""
+    _, default_max_chars = get_error_context_settings()
+    max_chars = max(800, int(max_chars or default_max_chars))
+    groups = group_log_error_events(extract_log_error_events(log_content))
+    if not groups:
+        return "grouped_issue_count: 0\nNo explicit ERROR/Exception/FATAL/panic event was detected."
+
+    header = (
+        f"grouped_issue_count: {len(groups)}\n"
+        "The backend scanned the complete input and grouped repeated events. "
+        "Every group below must be represented in the final issues array.\n"
+    )
+    available = max(200, max_chars - len(header))
+    per_group_budget = max(180, available // len(groups))
+    rendered_groups = []
+    for index, group in enumerate(groups, start=1):
+        metadata = (
+            f"\n[issue_group_{index}]\n"
+            f"first_line: {group.get('first_line')}\n"
+            f"last_line: {group.get('last_line')}\n"
+            f"occurrence_count: {group.get('occurrence_count')}\n"
+            f"languages: {', '.join(group.get('languages') or []) or 'unknown'}\n"
+            "representative_event:\n"
+        )
+        evidence_budget = max(80, per_group_budget - len(metadata))
+        rendered_groups.append(
+            metadata + _truncate_group_evidence(group.get("representative_text"), evidence_budget)
+        )
+    return (header + "".join(rendered_groups))[:max_chars]
+
+
+def build_log_error_event_summary(log_content, max_events=None):
+    """构建并返回 build_log_error_event_summary 对应的业务数据，保持现有调用约定。"""
+    events = extract_log_error_events(log_content, max_events=max_events)
+    if not events:
+        return "未识别到明确的 ERROR/Exception/FATAL/panic 事件。"
+
+    total = len(events)
+    lines = [f"共识别到 {total} 段错误/异常事件，以下按日志出现顺序列出，分析时必须逐段覆盖："]
+    for index, event in enumerate(events, start=1):
+        lines.append(f"\n[{index}] line {event['line']}")
+        lines.append(event["text"])
+    return "\n".join(lines)
+
+
+def build_full_log_analysis_context(log_content, max_chars=None):
+    """构建并返回 build_full_log_analysis_context 对应的业务数据，保持现有调用约定。"""
+    compact_context = build_compact_log_context(log_content, max_chars=max_chars)
+    error_summary = build_backend_log_analysis(log_content, max_chars=max_chars)
+    return (
+        f"{compact_context}\n\n"
+        "【全量错误清单】\n"
+        f"{error_summary}"
+    )
+
+
 def build_log_analysis_prompt(log_content):
+    """构建并返回 build_log_analysis_prompt 对应的业务数据，保持现有调用约定。"""
     context_lines, max_chars = get_error_context_settings()
-    relevant_context = extract_relevant_log_context(log_content, context_lines, max_chars)
+    full_context = build_full_log_analysis_context(log_content, max_chars=max_chars)
     return (
         "\u8bf7\u57fa\u4e8e\u3010\u65e5\u5fd7\u9519\u8bef\u5173\u952e\u6bb5\u53ca\u4e0a\u4e0b\u6587\u3011\u505a\u521d\u6b65\u5206\u6790\uff0c\u4e0d\u8981\u53ea\u6839\u636e ERROR \u5355\u884c\u4e0b\u7ed3\u8bba\u3002\n"
         f"\u540e\u7aef\u5df2\u4ece\u5b8c\u6574\u65e5\u5fd7\u4e0a\u4e0b\u6587\u4e2d\u63d0\u53d6\u9519\u8bef/\u5f02\u5e38\u5173\u952e\u884c\u53ca\u524d\u540e\u7ea6 {context_lines} \u884c\u4e0a\u4e0b\u6587\uff0c\u4ee5\u4fbf\u7ed3\u5408\u65f6\u5e8f\u548c\u8bf7\u6c42\u94fe\u8def\u5224\u65ad\u3002\n"
+        "必须逐条覆盖【全量错误清单】中的每一段错误/异常事件；如果多段错误属于同一根因，可以合并说明，但不能遗漏。\n"
         "\u5206\u6790\u65f6\u9700\u8981\u540c\u65f6\u5173\u6ce8 INFO\u3001WARN\u3001DEBUG\u3001ERROR \u4ee5\u53ca\u9519\u8bef\u524d\u540e\u7684\u8bf7\u6c42\u94fe\u8def\u3001\u72b6\u6001\u53d8\u5316\u3001\u8017\u65f6\u3001\u91cd\u8bd5\u3001\u8fde\u63a5\u3001\u914d\u7f6e\u52a0\u8f7d\u7b49\u4e0a\u4e0b\u6587\u3002\n"
         "\u8bf7\u5224\u65ad\u95ee\u9898\u53ef\u80fd\u6765\u81ea\u4ee3\u7801\u3001\u914d\u7f6e\u3001\u7f51\u7edc\u3001\u6570\u636e\u3001\u4f9d\u8d56/\u7b2c\u4e09\u65b9\u670d\u52a1\u3001\u8d44\u6e90\u6216\u672a\u77e5\u3002\n\n"
-        f"\u3010\u65e5\u5fd7\u9519\u8bef\u5173\u952e\u6bb5\u53ca\u4e0a\u4e0b\u6587\u3011\n{relevant_context}"
+        f"{full_context}"
     )
 
 
 def build_compact_log_context(log_content, max_chars=None):
+    """构建并返回 build_compact_log_context 对应的业务数据，保持现有调用约定。"""
     context_lines, default_max_chars = get_error_context_settings()
     max_chars = max_chars or default_max_chars
     relevant_context = extract_relevant_log_context(log_content, context_lines, max_chars)
@@ -626,6 +1208,7 @@ def build_compact_log_context(log_content, max_chars=None):
     )
 
 def analyze_log_with_deepseek(log_content):
+    """执行故障分析并返回 analyze_log_with_deepseek 对应的业务数据，保持现有调用约定。"""
     logging.info("==> \u8fdb\u5165 analyze_log_with_AI")
     try:
         logging.info("\u8c03\u7528 AI API \u8fdb\u884c\u65e5\u5fd7\u9519\u8bef\u5173\u952e\u6bb5\u5206\u6790")
@@ -633,12 +1216,15 @@ def analyze_log_with_deepseek(log_content):
         result = call_ai_model(system_prompt, build_log_analysis_prompt(log_content))
         logging.info("AI \u65e5\u5fd7\u9519\u8bef\u5173\u952e\u6bb5\u5206\u6790\u6210\u529f")
         return result
+    except AiServiceError:
+        raise
     except Exception as e:
         logging.exception(f"\u8c03\u7528 AI \u65e5\u5fd7\u5206\u6790\u5931\u8d25: {e}")
         return None
 
 
 def guess_image_mime_type(image_path):
+    """查找或推断并返回 guess_image_mime_type 对应的业务数据，保持现有调用约定。"""
     suffix = os.path.splitext(str(image_path or ""))[1].lower()
     return {
         ".png": "image/png",
@@ -648,16 +1234,19 @@ def guess_image_mime_type(image_path):
 
 
 def build_image_data_url(image_path):
+    """构建并返回 build_image_data_url 对应的业务数据，保持现有调用约定。"""
     with open(image_path, "rb") as file_obj:
         encoded = base64.b64encode(file_obj.read()).decode("ascii")
     return f"data:{guess_image_mime_type(image_path)};base64,{encoded}"
 
 
 def call_ai_multimodal_model(system_prompt, user_prompt, image_data_url):
+    """处理 call_ai_multimodal_model 对应的业务步骤，并向调用方返回所需结果。"""
     api_key = app.config.get("OPENAI_KEY")
     base_url = app.config.get("OPENAI_URL")
-    model = app.config.get("OPENAI_MODEL", "deepseek-chat")
     api_style = str(app.config.get("OPENAI_API_STYLE", "chat") or "chat").lower()
+    request_options = build_ai_request_options(app.config, api_style)
+    model = request_options["model"]
     if not api_key or not base_url:
         raise ValueError("API Key \u6216 Base URL \u672a\u914d\u7f6e")
 
@@ -665,38 +1254,44 @@ def call_ai_multimodal_model(system_prompt, user_prompt, image_data_url):
     image_data_urls = [item for item in image_data_urls if item]
     logging.info("\u5f00\u59cb\u8c03\u7528\u591a\u6a21\u6001 AI\uff1amodel=%s, style=%s", model, api_style)
     client = OpenAI(api_key=api_key, base_url=base_url)
-    if api_style in ("response", "responses"):
-        content = [{"type": "input_text", "text": user_prompt}]
-        content.extend({"type": "input_image", "image_url": image_url} for image_url in image_data_urls)
-        response = client.responses.create(
-            model=model,
-            input=[
+    try:
+        if api_style in ("response", "responses"):
+            content = [{"type": "input_text", "text": user_prompt}]
+            content.extend({"type": "input_image", "image_url": image_url} for image_url in image_data_urls)
+            response = client.responses.create(
+                **request_options,
+                input=[
+                    {"role": "system", "content": system_prompt},
+                    {
+                        "role": "user",
+                        "content": content,
+                    },
+                ],
+            )
+            return extract_responses_text(response)
+
+        content = [{"type": "text", "text": user_prompt}]
+        content.extend({"type": "image_url", "image_url": {"url": image_url}} for image_url in image_data_urls)
+        response = client.chat.completions.create(
+            **request_options,
+            messages=[
                 {"role": "system", "content": system_prompt},
                 {
                     "role": "user",
                     "content": content,
                 },
             ],
+            stream=False,
         )
-        return extract_responses_text(response)
-
-    content = [{"type": "text", "text": user_prompt}]
-    content.extend({"type": "image_url", "image_url": {"url": image_url}} for image_url in image_data_urls)
-    response = client.chat.completions.create(
-        model=model,
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {
-                "role": "user",
-                "content": content,
-            },
-        ],
-        stream=False,
-    )
-    return response.choices[0].message.content
+        return response.choices[0].message.content
+    except AiServiceError:
+        raise
+    except Exception as exc:
+        raise normalize_ai_exception(exc) from exc
 
 
 def normalize_image_analysis(image_tag, payload, image_description=""):
+    """规范化并返回 normalize_image_analysis 对应的业务数据，保持现有调用约定。"""
     data = payload if isinstance(payload, dict) else {}
     text_candidates = [
         data.get("extracted_text"),
@@ -778,10 +1373,20 @@ def normalize_image_analysis(image_tag, payload, image_description=""):
 
 
 def analyze_uploaded_image(image_path, image_tag, image_description=""):
+    """执行故障分析并返回 analyze_uploaded_image 对应的业务数据，保持现有调用约定。"""
     image_paths = image_path if isinstance(image_path, list) else [image_path]
     image_paths = [path for path in image_paths if path]
     image_data_url = [build_image_data_url(path) for path in image_paths]
     image_type_label = "\u65e5\u5fd7\u622a\u56fe" if image_tag == "log_image" else "\u4e1a\u52a1\u622a\u56fe"
+    multi_image_schema = ""
+    if len(image_paths) > 1:
+        image_labels = "、".join(f"第{index}张" for index in range(1, len(image_paths) + 1))
+        multi_image_schema = (
+            f"本次共上传 {len(image_paths)} 张图片（{image_labels}），必须按上传顺序逐张输出识别结果，"
+            "不能只分析第一张。JSON 必须额外包含 image_findings 数组，每张图片对应一个对象，"
+            "字段包含 image_index、summary、extracted_text、visible_errors。每张图片至少保留一条记录；"
+            "只有确认是同一错误的重复截图时才允许合并，并在 summary 中说明合并依据。\n"
+        )
     business_schema = ""
     if image_tag == "business_image":
         business_schema = (
@@ -790,7 +1395,7 @@ def analyze_uploaded_image(image_path, image_tag, image_description=""):
             "missing_context 用于提醒用户补充上下游信息；如果截图无法确认请求参数、业务ID、服务日志、"
             "DB/Redis/ES/Kafka/RPC 下游返回，就必须列出 direction(upstream/downstream/current)、"
             "title、reason、needed、how_to_get。\n"
-            "多张图片需要按上传顺序理解成同一个业务流程，不要只分析第一张。\n"
+            "多张业务图片可以关联为同一流程，但仍必须先逐张识别，再判断是否属于同一问题。\n"
         )
     image_description_text = image_description or "\u65e0"
     prompt = (
@@ -798,6 +1403,7 @@ def analyze_uploaded_image(image_path, image_tag, image_description=""):
         "JSON \u5fc5\u987b\u5305\u542b\uff1asummary\u3001extracted_text\u3001keywords\u3001components\u3002\n"
         "\u5982\u679c\u662f\u65e5\u5fd7\u622a\u56fe\uff0c\u8bf7\u5c3d\u91cf\u63d0\u53d6\u9519\u8bef\u65e5\u5fd7\u3001\u5f02\u5e38\u5806\u6808\u3001\u9519\u8bef\u5173\u952e\u5b57\u3002\n"
         "\u5982\u679c\u662f\u4e1a\u52a1\u622a\u56fe\uff0c\u8bf7\u63d0\u53d6\u9875\u9762\u63d0\u793a\u3001\u5173\u952e\u4e1a\u52a1\u72b6\u6001\u3001\u62a5\u9519\u6587\u6848\uff0c\u4ee5\u53ca\u53ef\u7528\u4e8e\u4ee3\u7801\u6392\u67e5\u7684\u5173\u952e\u5b57\u3002\n"
+        f"{multi_image_schema}"
         f"{business_schema}"
         f"\u7528\u6237\u8865\u5145\u63cf\u8ff0\uff1a{image_description_text}"
     )
@@ -809,6 +1415,7 @@ def analyze_uploaded_image(image_path, image_tag, image_description=""):
 
 
 def build_image_analysis_context(image_analysis, image_description=""):
+    """构建并返回 build_image_analysis_context 对应的业务数据，保持现有调用约定。"""
     image_tag = str((image_analysis or {}).get("image_tag") or "").strip().lower()
     image_type_label = "\u65e5\u5fd7\u622a\u56fe" if image_tag == "log_image" else "\u4e1a\u52a1\u622a\u56fe"
     summary = str((image_analysis or {}).get("summary") or "").strip()
@@ -864,11 +1471,13 @@ def build_image_analysis_context(image_analysis, image_description=""):
 
 
 def call_ai_model(system_prompt, user_prompt):
+    """处理 call_ai_model 对应的业务步骤，并向调用方返回所需结果。"""
     api_key = app.config.get("OPENAI_KEY")
     base_url = app.config.get("OPENAI_URL")
-    model = app.config.get("OPENAI_MODEL", "deepseek-chat")
     api_style = app.config.get("OPENAI_API_STYLE", "chat")
     api_style = str(api_style or "chat").lower()
+    request_options = build_ai_request_options(app.config, api_style)
+    model = request_options["model"]
     logging.info(
         "AI \u914d\u7f6e\u68c0\u67e5 - API_KEY: %s, BASE_URL: %s, MODEL: %s, STYLE: %s",
         "\u5b58\u5728" if api_key else "\u7f3a\u5931",
@@ -881,28 +1490,34 @@ def call_ai_model(system_prompt, user_prompt):
         raise ValueError("API Key \u6216 Base URL \u672a\u914d\u7f6e")
 
     client = OpenAI(api_key=api_key, base_url=base_url)
-    if api_style in ("response", "responses"):
-        response = client.responses.create(
-            model=model,
-            input=[
+    try:
+        if api_style in ("response", "responses"):
+            response = client.responses.create(
+                **request_options,
+                input=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+            )
+            return extract_responses_text(response)
+
+        response = client.chat.completions.create(
+            **request_options,
+            messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
             ],
+            stream=False,
         )
-        return extract_responses_text(response)
-
-    response = client.chat.completions.create(
-        model=model,
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ],
-        stream=False,
-    )
-    return response.choices[0].message.content
+        return response.choices[0].message.content
+    except AiServiceError:
+        raise
+    except Exception as exc:
+        raise normalize_ai_exception(exc) from exc
 
 
 def extract_responses_text(response):
+    """解析或提取并返回 extract_responses_text 对应的业务数据，保持现有调用约定。"""
     output_text = getattr(response, "output_text", None)
     if output_text:
         return output_text
@@ -928,7 +1543,17 @@ def extract_responses_text(response):
     return "\n".join(text_parts).strip()
 
 def extract_error_info_from_log(log_content):
+    """解析或提取并返回 extract_error_info_from_log 对应的业务数据，保持现有调用约定。"""
     logging.info("==> \u8fdb\u5165 extract_error_info_from_log")
+    source_locations = extract_source_locations(log_content)
+    if source_locations:
+        logging.info(
+            "\u63d0\u53d6\u5230\u591a\u8bed\u8a00\u5806\u6808\u4fe1\u606f\uff1acount=%s, languages=%s",
+            len(source_locations),
+            detect_log_languages(log_content),
+        )
+        return source_locations
+
     error_info = []
     error_matches = re.findall(
         r'(?:^|\n)\s*([A-Za-z_][\w\.]*(?:Exception|Error):\s*.*)',
@@ -938,7 +1563,14 @@ def extract_error_info_from_log(log_content):
         error_message = error_matches[-1].strip()
     else:
         error_line = re.search(r'(Exception|Error):\s*(.*)', log_content)
-        error_message = error_line.group(0).strip() if error_line else "\u672a\u77e5\u9519\u8bef"
+        panic_line = re.search(r'(?m)^\s*(panic:\s*.+)$', log_content)
+        error_message = (
+            error_line.group(0).strip()
+            if error_line
+            else panic_line.group(1).strip()
+            if panic_line
+            else "\u672a\u77e5\u9519\u8bef"
+        )
     logging.info("\u5339\u914d\u5230\u7684\u9519\u8bef\u63cf\u8ff0\uff1a%s", error_message)
 
     python_frames = re.findall(
@@ -955,21 +1587,34 @@ def extract_error_info_from_log(log_content):
         logging.info("\u63d0\u53d6\u5230 Python \u5806\u6808\u4fe1\u606f\uff1acount=%s", len(error_info))
         return error_info
 
-    stack_match = re.search(r'\s+at\s+[\w\.]+\(([\w\.]+):(\d+)\)', log_content)
-    if stack_match:
-        file_name = stack_match.group(1)
-        line_str = stack_match.group(2)
-        try:
-            line_number = int(line_str)
-        except ValueError:
-            logging.warning("\u5806\u6808\u884c\u53f7\u8f6c\u6362\u5931\u8d25\uff0c\u9ed8\u8ba4\u4f7f\u7528 1")
-            line_number = 1
-        logging.info("\u63d0\u53d6\u5230\u5806\u6808\u4fe1\u606f\uff1a\u6587\u4ef6 %s, \u884c\u53f7 %s", file_name, line_number)
-        error_info.append({
-            "file": file_name,
-            "line": line_number,
-            "error": error_message
-        })
+    go_frames = re.findall(
+        r'(?m)^\s+([^\s]+\.go):(\d+)(?:\s+\+0x[0-9a-fA-F]+)?',
+        log_content,
+    )
+    if go_frames:
+        for file_name, line_str in go_frames:
+            error_info.append({
+                "file": os.path.basename(file_name),
+                "line": int(line_str),
+                "error": error_message,
+            })
+        logging.info("\u63d0\u53d6\u5230 Go \u5806\u6808\u4fe1\u606f\uff1acount=%s", len(error_info))
+        return error_info
+
+    stack_matches = re.findall(r'\s+at\s+[\w.$]+\(([\w.$-]+):(\d+)\)', log_content)
+    if stack_matches:
+        for file_name, line_str in stack_matches:
+            try:
+                line_number = int(line_str)
+            except ValueError:
+                logging.warning("\u5806\u6808\u884c\u53f7\u8f6c\u6362\u5931\u8d25\uff0c\u9ed8\u8ba4\u4f7f\u7528 1")
+                line_number = 1
+            logging.info("\u63d0\u53d6\u5230\u5806\u6808\u4fe1\u606f\uff1a\u6587\u4ef6 %s, \u884c\u53f7 %s", file_name, line_number)
+            error_info.append({
+                "file": file_name,
+                "line": line_number,
+                "error": error_message
+            })
     else:
         logging.info("\u672a\u5339\u914d\u5230\u5806\u6808\u4fe1\u606f\uff0c\u4ec5\u4fdd\u7559\u9519\u8bef\u63cf\u8ff0")
         error_info.append({
@@ -981,6 +1626,7 @@ def extract_error_info_from_log(log_content):
 
 
 def resolve_file_paths(repo_path, error_info):
+    """解析并返回 resolve_file_paths 对应的业务数据，保持现有调用约定。"""
     logging.info("==> \u8fdb\u5165 resolve_file_paths")
     resolved = []
     for err in error_info:
@@ -1004,6 +1650,7 @@ def resolve_file_paths(repo_path, error_info):
 
 
 def extract_code_snippets(resolved_errors):
+    """解析或提取并返回 extract_code_snippets 对应的业务数据，保持现有调用约定。"""
     logging.info("==> \u8fdb\u5165 extract_code_snippets")
     code_snippets = []
     for err in resolved_errors:
@@ -1048,6 +1695,7 @@ def extract_code_snippets(resolved_errors):
 
 
 def detect_error_components(log_content):
+    """处理 detect_error_components 对应的业务步骤，并向调用方返回所需结果。"""
     text = str(log_content or "").lower()
     components = []
     for component, patterns in COMPONENT_USAGE_PATTERNS.items():
@@ -1057,6 +1705,7 @@ def detect_error_components(log_content):
 
 
 def find_component_code_usages(repo_path, components, max_matches=8):
+    """查找或推断并返回 find_component_code_usages 对应的业务数据，保持现有调用约定。"""
     if not repo_path or not os.path.exists(repo_path) or not components:
         return []
 
@@ -1098,6 +1747,7 @@ def find_component_code_usages(repo_path, components, max_matches=8):
 
 
 def read_text_lines(file_path):
+    """读取并返回 read_text_lines 对应的业务数据，保持现有调用约定。"""
     for encoding in ("utf-8", "utf-8-sig", "gb18030"):
         try:
             with open(file_path, "r", encoding=encoding) as file_obj:
@@ -1109,7 +1759,851 @@ def read_text_lines(file_path):
     return []
 
 
+def normalize_module_name(value):
+    """规范化并返回 normalize_module_name 对应的业务数据，保持现有调用约定。"""
+    return re.sub(r"[^a-z0-9]+", "", str(value or "").lower())
+
+
+def normalize_service_module_name(value):
+    """规范化并返回 normalize_service_module_name 对应的业务数据，保持现有调用约定。"""
+    name = re.sub(r"[^a-z0-9_-]+", "-", str(value or "").lower()).strip("-")
+    name = re.sub(r"-svc$", "", name)
+    return name
+
+
+INFRASTRUCTURE_MODULE_NAME_PATTERNS = [
+    re.compile(r"(^|-)minio($|-)"),
+    re.compile(r"(^|-)cluster($|-)"),
+    re.compile(r"^zhuiyi-[a-z0-9-]+$"),
+]
+
+
+def is_infrastructure_or_bucket_name(value):
+    """判断 is_infrastructure_or_bucket_name 对应的业务数据，保持现有调用约定。"""
+    name = normalize_service_module_name(value)
+    if not name:
+        return True
+    return any(pattern.search(name) for pattern in INFRASTRUCTURE_MODULE_NAME_PATTERNS)
+
+
+def module_name_matches_text(module_name, source_text):
+    """处理 module_name_matches_text 对应的业务步骤，并向调用方返回所需结果。"""
+    normalized = normalize_service_module_name(module_name)
+    if not normalized:
+        return False
+    parts = [part for part in re.split(r"[-_]+", normalized) if part]
+    if not parts:
+        return False
+    separator = r"[-_\.]?"
+    core_pattern = separator.join(re.escape(part) for part in parts)
+    pattern = rf"(?<![a-z0-9]){core_pattern}(?:-svc)?(?![a-z0-9])"
+    return re.search(pattern, str(source_text or "").lower()) is not None
+
+
+def iter_source_files(repo_path):
+    """处理 iter_source_files 对应的业务步骤，并向调用方返回所需结果。"""
+    if not repo_path or not os.path.exists(repo_path):
+        return
+    for root, dirs, files in os.walk(repo_path):
+        dirs[:] = [name for name in dirs if name not in SKIP_CODE_SEARCH_DIRS]
+        for filename in files:
+            suffix = os.path.splitext(filename)[1].lower()
+            if suffix in SOURCE_CODE_SUFFIXES:
+                yield os.path.join(root, filename)
+
+
+def discover_related_modules(repo_path, log_content, available_modules, primary_module_id=None, max_modules=8):
+    """查找或推断并返回 discover_related_modules 对应的业务数据，保持现有调用约定。"""
+    primary_id = str(primary_module_id or "")
+    candidates = []
+    for module in available_modules or []:
+        module_id = str(module.get("module_id") or module.get("moduleId") or "")
+        module_name = module.get("module_name") or module.get("moduleName") or module.get("name")
+        normalized = normalize_module_name(module_name)
+        if not module_name or not normalized or module_id == primary_id:
+            continue
+        candidates.append({
+            "moduleId": module_id or None,
+            "moduleName": str(module_name),
+            "normalized": normalized,
+        })
+
+    found = {}
+    log_text = normalize_module_name(log_content)
+    for candidate in candidates:
+        if candidate["normalized"] in log_text:
+            found[candidate["moduleName"]] = {
+                "moduleId": candidate["moduleId"],
+                "moduleName": candidate["moduleName"],
+                "role": "related",
+                "reason": "日志中出现该模块名称，可能位于本次故障链路上。",
+            }
+
+    for file_path in iter_source_files(repo_path):
+        lines = read_text_lines(file_path)
+        if not lines:
+            continue
+        text = normalize_module_name("".join(lines))
+        for candidate in candidates:
+            if candidate["moduleName"] in found:
+                continue
+            if candidate["normalized"] in text:
+                found[candidate["moduleName"]] = {
+                    "moduleId": candidate["moduleId"],
+                    "moduleName": candidate["moduleName"],
+                    "role": "related",
+                    "reason": f"主模块代码中出现该模块名称：{os.path.basename(file_path)}。",
+                }
+                if len(found) >= max_modules:
+                    return list(found.values())
+    return list(found.values())[:max_modules]
+
+
+def infer_related_module_role(source_text, module_name):
+    """查找或推断并返回 infer_related_module_role 对应的业务数据，保持现有调用约定。"""
+    normalized_text = normalize_module_name(source_text)
+    normalized_name = normalize_module_name(module_name)
+    index = normalized_text.find(normalized_name)
+    if index < 0:
+        return "related"
+    window = normalized_text[max(0, index - 120):index + len(normalized_name) + 120]
+    if any(token in window for token in ("callback", "webhook", "notify", "return", "response")):
+        return "upstream"
+    if any(token in window for token in ("transfer", "client", "service", "request", "http", "rpc", "call")):
+        return "downstream"
+    return "related"
+
+
+def split_camel_words(value):
+    """解析或提取并返回 split_camel_words 对应的业务数据，保持现有调用约定。"""
+    words = re.findall(r"[A-Z]?[a-z]+|[A-Z]+(?=[A-Z]|$)|\d+", str(value or ""))
+    return [word.lower() for word in words if word]
+
+
+def infer_missing_module_names_from_text(source_text, max_modules=3):
+    """查找或推断并返回 infer_missing_module_names_from_text 对应的业务数据，保持现有调用约定。"""
+    text = str(source_text or "")
+    names = []
+
+    for match in re.finditer(r"https?://([^/\s:,]+)(?::\d+)?(/[^\s,\"]*)?", text, re.IGNORECASE):
+        host = normalize_service_module_name(match.group(1))
+        path_parts = [normalize_service_module_name(part) for part in (match.group(2) or "").split("/") if part]
+        names.extend(
+            candidate for candidate in [host, *(path_parts[:1])]
+            if candidate and not is_infrastructure_or_bucket_name(candidate)
+        )
+
+    for match in re.finditer(r"\bcom\.zhuiyi\.([a-z0-9_]+)(?:\.([a-z0-9_]+))?", text, re.IGNORECASE):
+        parts = [part for part in match.groups() if part]
+        if parts:
+            names.append(normalize_service_module_name("-".join(part.lower() for part in parts[:2])))
+
+    for match in re.finditer(r"(?:离线|调用|请求|服务|模块)\s*([A-Za-z][A-Za-z0-9_-]{1,40})", text):
+        names.append(match.group(1).lower())
+
+    ignored = {
+        "com", "zhuiyi", "exception", "error", "message", "http", "rpc", "desc", "code",
+        "unavailable", "connection", "closed", "server", "preface", "received", "results",
+        "requests", "download", "file", "please", "check", "disk", "space", "url", "facade",
+    }
+    deduped = []
+    for name in names:
+        normalized = normalize_service_module_name(name)
+        if not normalized or normalized in ignored or normalized in deduped:
+            continue
+        deduped.append(normalized)
+        if len(deduped) >= max_modules:
+            break
+    return deduped
+
+
+def discover_related_modules_from_text(source_text, available_modules, primary_module_id=None, max_modules=8):
+    """查找或推断并返回 discover_related_modules_from_text 对应的业务数据，保持现有调用约定。"""
+    primary_id = str(primary_module_id or "")
+    normalized_text = normalize_module_name(source_text)
+    found = []
+    for module in available_modules or []:
+        module_id = str(module.get("module_id") or module.get("moduleId") or "")
+        module_name = module.get("module_name") or module.get("moduleName") or module.get("name")
+        normalized_name = normalize_module_name(module_name)
+        if not module_name or not normalized_name or module_id == primary_id:
+            continue
+        if not module_name_matches_text(module_name, source_text):
+            continue
+        found.append({
+            "moduleId": module_id,
+            "moduleName": str(module_name),
+            "role": infer_related_module_role(source_text, module_name),
+            "reason": "当前日志/图片内容命中该模块名称，已自动加入上下游版本代码判断。",
+        })
+        if len(found) >= max_modules:
+            break
+    if not found:
+        for module_name in infer_missing_module_names_from_text(source_text, max_modules=max_modules):
+            found.append({
+                "moduleId": "",
+                "moduleName": module_name,
+                "role": infer_related_module_role(source_text, module_name),
+                "reason": "日志命中疑似上下游模块名，但当前产品仓库列表中未找到该模块仓库，请补充仓库权限或模块配置。",
+            })
+    return found
+
+
+def build_chain_issue_context_block(lines, index, before=4, after=8):
+    """构建并返回 build_chain_issue_context_block 对应的业务数据，保持现有调用约定。"""
+    start = max(0, index - before)
+    end = min(len(lines), index + after + 1)
+    next_event_re = re.compile(r"^\d{4}[-/]\d{2}[-/]\d{2}.*\b(ERROR|Exception|Error|panic:|WARN)\b", re.IGNORECASE)
+    for cursor in range(index + 1, end):
+        if next_event_re.search(lines[cursor]):
+            end = cursor
+            break
+    while end < len(lines) and re.search(r"^\s+(at\s+[\w.$]+\(|Caused by:|\.\.\.\s+\d+\s+more)", lines[end]):
+        end += 1
+    return "\n".join(lines[start:end])
+
+
+def split_chain_issue_candidates(source_text, available_modules=None, primary_module_id=None, max_candidates=50):
+    """解析或提取并返回 split_chain_issue_candidates 对应的业务数据，保持现有调用约定。"""
+    candidates = []
+    seen = set()
+    lines = [line.strip() for line in str(source_text or "").splitlines() if line.strip()]
+    for line_index, line in enumerate(lines):
+        if not re.search(r"\b(ERROR|Exception|Error|panic:|WARN)\b|异常|失败|错误|超时", line, re.IGNORECASE):
+            continue
+        issue_text = build_chain_issue_context_block(lines, line_index)
+        decision = assess_chain_relevance(issue_text)
+        if not decision.get("requiresRelatedEvidence"):
+            continue
+        related_modules = discover_related_modules_from_text(
+            issue_text,
+            available_modules or [],
+            primary_module_id=primary_module_id,
+        )
+        normalized_line = normalize_module_name(line)
+        related_modules.sort(
+            key=lambda item: 0
+            if normalize_module_name(item.get("moduleName")) in normalized_line
+            else 1
+        )
+        module_key = ",".join(sorted(item.get("moduleName") or "" for item in related_modules))
+        summary = summarize_issue_context(issue_text)
+        key = (normalize_module_name(module_key), normalize_module_name(summary[:160]))
+        if key in seen:
+            continue
+        seen.add(key)
+        candidates.append({
+            "index": len(candidates),
+            "issueSummary": summary,
+            "issueContext": issue_text,
+            "matchedSignals": decision.get("matchedSignals", []),
+            "relatedModules": related_modules,
+            "reason": decision.get("reason"),
+        })
+        if len(candidates) >= max_candidates:
+            break
+    return candidates
+
+
+def build_analysis_repositories(data, task_id=None):
+    """构建并返回 build_analysis_repositories 对应的业务数据，保持现有调用约定。"""
+    repositories = [{
+        "role": "primary",
+        "moduleId": str(data.get("moduleId") or ""),
+        "moduleName": data.get("moduleName") or data.get("primaryModuleName") or "primary",
+        "branchAddress": data.get("branchAddress"),
+        "tagVersion": data.get("tagVersion"),
+        "workspaceId": str(task_id or "shared"),
+    }]
+
+    for index, module in enumerate(data.get("relatedModules") or [], start=1):
+        if not module.get("branchAddress") or not module.get("tagVersion"):
+            continue
+        module_id = str(module.get("moduleId") or module.get("module_id") or index)
+        repositories.append({
+            "role": module.get("role") or "related",
+            "moduleId": module_id,
+            "moduleName": module.get("moduleName") or module.get("module_name") or f"related-{index}",
+            "branchAddress": module.get("branchAddress"),
+            "tagVersion": module.get("tagVersion"),
+            "workspaceId": str(task_id or "shared"),
+        })
+    return repositories
+
+
+def clone_analysis_repositories(repositories, clone_func, max_workers=4):
+    """处理 clone_analysis_repositories 对应的业务步骤，并向调用方返回所需结果。"""
+    cloned_repositories = []
+    if not repositories:
+        return cloned_repositories
+
+    flask_app = None
+    try:
+        from flask import has_app_context
+        if has_app_context():
+            flask_app = app._get_current_object()
+    except Exception:
+        flask_app = None
+
+    def run_clone(repository):
+        """执行 run_clone 对应的业务数据，保持现有调用约定。"""
+        if flask_app is not None:
+            with flask_app.app_context():
+                return clone_func(
+                    repository.get("branchAddress"),
+                    repository.get("tagVersion"),
+                    workspace_id=repository.get("workspaceId"),
+                )
+        return clone_func(
+            repository.get("branchAddress"),
+            repository.get("tagVersion"),
+            workspace_id=repository.get("workspaceId"),
+        )
+
+    worker_count = max(1, min(int(max_workers or 1), len(repositories)))
+    with ThreadPoolExecutor(max_workers=worker_count) as executor:
+        future_map = {
+            executor.submit(run_clone, repository): repository
+            for repository in repositories
+        }
+        for future in as_completed(future_map):
+            repository = future_map[future]
+            try:
+                repo_path = future.result()
+            except Exception:
+                logging.exception(
+                    "并发拉取代码失败：module=%s, repo=%s, version=%s",
+                    repository.get("moduleName"),
+                    repository.get("branchAddress"),
+                    repository.get("tagVersion"),
+                )
+                if repository.get("role") == "primary":
+                    raise
+                continue
+            if not repo_path:
+                continue
+            cloned = dict(repository)
+            cloned["repo_path"] = repo_path
+            cloned_repositories.append(cloned)
+    return cloned_repositories
+
+
+def get_available_modules_for_product(product_id):
+    """读取并返回 get_available_modules_for_product 对应的业务数据，保持现有调用约定。"""
+    if not product_id:
+        return []
+    try:
+        from app.modules.models.model import Module
+        from app.relasionship.models.model import ProductModule
+    except ImportError:
+        logging.warning("\u6a21\u5757\u6a21\u578b\u52a0\u8f7d\u5931\u8d25\uff0c\u65e0\u6cd5\u8bc6\u522b\u4e0a\u4e0b\u6e38\u6a21\u5757")
+        return []
+
+    product_modules = ProductModule.query.filter_by(product_id=product_id).all()
+    modules = []
+    for relation in product_modules:
+        module = Module.query.get(relation.module_id)
+        if module:
+            modules.append({"module_id": module.id, "module_name": module.name})
+    return modules
+
+
+def _normalize_signal(value):
+    """规范化并返回 _normalize_signal 对应的业务数据，保持现有调用约定。"""
+    return re.sub(r"[^a-z0-9_./-]+", "", str(value or "").lower())
+
+
+def build_related_code_signals(source_text, matched_signals=None):
+    """构建并返回 build_related_code_signals 对应的业务数据，保持现有调用约定。"""
+    signals = []
+
+    url_signals = []
+    for url in re.findall(r"https?://[^\s,\"']+", str(source_text or ""), flags=re.IGNORECASE):
+        path = re.sub(r"^https?://[^/]+", "", url, flags=re.IGNORECASE).split("?", 1)[0]
+        segments = [segment for segment in path.split("/") if segment]
+        for signal in [
+            segments[-1] if segments else "",
+            "/".join(segments[-2:]) if len(segments) >= 2 else "",
+            "/".join(segments[-3:]) if len(segments) >= 3 else "",
+        ]:
+            normalized = _normalize_signal(signal)
+            if len(normalized) >= 5 and normalized not in url_signals:
+                url_signals.append(normalized)
+
+    for signal in url_signals + list(matched_signals or []) + RELATED_CODE_SIGNAL_PATTERNS:
+        normalized = _normalize_signal(signal)
+        if len(normalized) < 3:
+            continue
+        if normalized not in signals:
+            signals.append(normalized)
+
+    for token in re.findall(r"[A-Za-z][A-Za-z0-9_.:/-]{3,80}", str(source_text or "")):
+        normalized = _normalize_signal(token)
+        if (
+            len(normalized) >= 5
+            and any(marker in normalized for marker in ("api", "http", "rpc", "callback", "service", "client"))
+            and normalized not in signals
+        ):
+            signals.append(normalized)
+        if len(signals) >= 40:
+            break
+    return signals[:40]
+
+
+def find_related_code_signal_hits(repo_path, signals, max_hits=8):
+    """查找或推断并返回 find_related_code_signal_hits 对应的业务数据，保持现有调用约定。"""
+    normalized_signals = [signal for signal in signals or [] if signal]
+    hits = []
+    if not normalized_signals:
+        return hits
+
+    for file_path in iter_source_files(repo_path):
+        lines = read_text_lines(file_path)
+        for line_index, line in enumerate(lines, start=1):
+            lowered_line = line.lower()
+            matched = [signal for signal in normalized_signals if signal in _normalize_signal(lowered_line)]
+            if not matched:
+                continue
+            hits.append({
+                "file": file_path,
+                "line": line_index,
+                "signal": matched[0],
+                "content": line.strip()[:300],
+            })
+            if len(hits) >= max_hits:
+                return hits
+    return hits
+
+
+def find_related_repository_code_usages(repo_path, log_content, components, max_matches=8):
+    """查找或推断并返回 find_related_repository_code_usages 对应的业务数据，保持现有调用约定。"""
+    component_snippets = find_component_code_usages(repo_path, components, max_matches=max_matches)
+    remaining = max(0, max_matches - len(component_snippets))
+    if not remaining:
+        return component_snippets
+
+    signals = build_related_code_signals(log_content)
+    hits = find_related_code_signal_hits(repo_path, signals, max_hits=remaining)
+    signal_errors = [
+        {
+            "file": hit.get("file"),
+            "line": hit.get("line"),
+            "error": f"上下游链路信号 {hit.get('signal')}",
+            "component": hit.get("signal"),
+            "reason": "日志中的接口、回调或服务链路信号在该上下游仓库中命中。",
+        }
+        for hit in hits
+    ]
+    signal_snippets = extract_code_snippets(signal_errors)
+    merged = []
+    seen = set()
+    for snippet in component_snippets + signal_snippets:
+        key = (snippet.get("file"), snippet.get("line"), snippet.get("component"))
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(snippet)
+    return merged[:max_matches]
+
+
+def assess_related_code_ownership(source_text, chain_decision, cloned_repositories):
+    """执行故障分析并返回 assess_related_code_ownership 对应的业务数据，保持现有调用约定。"""
+    signals = build_related_code_signals(source_text, chain_decision.get("matchedSignals"))
+    related_hits = []
+    primary_hits = []
+    for repository in cloned_repositories or []:
+        hits = find_related_code_signal_hits(repository.get("repo_path"), signals)
+        if not hits:
+            continue
+        item = {
+            "moduleId": repository.get("moduleId"),
+            "moduleName": repository.get("moduleName"),
+            "role": repository.get("role"),
+            "hits": hits,
+        }
+        if repository.get("role") == "primary":
+            primary_hits.append(item)
+        else:
+            related_hits.append(item)
+
+    if not related_hits:
+        return {
+            "status": "no_related_code_signal",
+            "requiresRelatedEvidence": False,
+            "chainOwner": "primary",
+            "message": "版本代码中未发现明确的上下游接口/回调命中，先使用当前日志/图片分析故障原因。",
+            "reason": "已拉取用户选择的版本代码，但相关模块中没有命中当前报错的链路信号。",
+            "codeEvidence": primary_hits,
+        }
+
+    roles = {item.get("role") for item in related_hits}
+    if "upstream" in roles and "downstream" in roles:
+        owner = "upstream_downstream"
+        owner_label = "上游或下游"
+    elif "upstream" in roles:
+        owner = "upstream"
+        owner_label = "上游"
+    elif "downstream" in roles:
+        owner = "downstream"
+        owner_label = "下游"
+    else:
+        owner = "related"
+        owner_label = "上下游关联模块"
+
+    return {
+        "status": "need_related_evidence",
+        "requiresRelatedEvidence": True,
+        "chainOwner": owner,
+        "message": f"版本代码判断此问题可能由{owner_label}出现，请继续补充对应日志或图片。",
+        "reason": "用户选择的上下游版本代码中命中了当前报错的接口调用、回调、响应或超时信号。",
+        "codeEvidence": related_hits,
+    }
+
+
+def read_analysis_input_text(data):
+    """读取并返回 read_analysis_input_text 对应的业务数据，保持现有调用约定。"""
+    source_type = str(data.get("source_type") or "file").lower()
+    if source_type == "image":
+        return "\n".join(
+            str(value or "")
+            for value in [data.get("image_tag"), data.get("image_description")]
+            if value
+        )
+    input_path = data.get("file_path")
+    if not input_path or not os.path.exists(input_path):
+        return ""
+    try:
+        with open(input_path, "r", encoding="utf-8") as file_obj:
+            return file_obj.read()
+    except UnicodeDecodeError:
+        with open(input_path, "r", encoding="gb18030", errors="ignore") as file_obj:
+            return file_obj.read()
+    except OSError:
+        return ""
+
+
+def summarize_issue_text(text):
+    """格式化或整理并返回 summarize_issue_text 对应的业务数据，保持现有调用约定。"""
+    lines = [line.strip() for line in str(text or "").splitlines() if line.strip()]
+    for line in lines:
+        if re.search(r"\b(ERROR|Exception|Error|panic:|WARN)\b|异常|失败|错误|超时", line, re.IGNORECASE):
+            return line[:500]
+    return (lines[0] if lines else "")[:500]
+
+
+def summarize_issue_context(text):
+    """格式化或整理并返回 summarize_issue_context 对应的业务数据，保持现有调用约定。"""
+    lines = [line.strip() for line in str(text or "").splitlines() if line.strip()]
+    return "\n".join(lines)[:500]
+
+
+def assess_chain_relevance(text):
+    """执行故障分析并返回 assess_chain_relevance 对应的业务数据，保持现有调用约定。"""
+    source_text = str(text or "")
+    lowered_text = source_text.lower()
+    matched_chain = []
+    for pattern in CHAIN_RELEVANCE_PATTERNS:
+        match = re.search(pattern, source_text, re.IGNORECASE)
+        if match:
+            matched_chain.append(match.group(0))
+
+    matched_local = []
+    for pattern in LOCAL_ONLY_PATTERNS:
+        match = re.search(pattern, source_text, re.IGNORECASE)
+        if match:
+            matched_local.append(match.group(0))
+
+    requires_related = bool(matched_chain)
+    if requires_related:
+        reason = "当前日志/图片中出现接口调用、远程服务、回调、超时或上下游返回异常信号，需要补充上下游日志或截图继续判断。"
+        message = "识别到此问题可能涉及上下游链路，请补充上游/下游日志或图片。"
+    else:
+        reason = "当前日志/图片未发现明确的接口调用、远程服务返回、回调或上下游超时信号。"
+        if matched_local:
+            reason += " 已发现更偏本模块内部异常的信号：" + "、".join(matched_local[:3])
+        message = "此问题不涉及上下游链路判断，开始分析故障原因。"
+
+    return {
+        "status": "need_related_evidence" if requires_related else "no_related_evidence",
+        "requiresRelatedEvidence": requires_related,
+        "message": message,
+        "reason": reason,
+        "issueSummary": summarize_issue_text(source_text),
+        "matchedSignals": matched_chain[:8],
+        "evidenceTypes": ["log", "image"] if requires_related else [],
+    }
+
+
+def build_chain_relevance_input(data):
+    """构建并返回 build_chain_relevance_input 对应的业务数据，保持现有调用约定。"""
+    source_type = str(data.get("source_type") or "file").lower()
+    if source_type == "image":
+        input_paths = [path for path in (data.get("file_paths") or []) if path]
+        if data.get("file_path") and data.get("file_path") not in input_paths:
+            input_paths.insert(0, data.get("file_path"))
+        metadata = [data.get("image_tag"), data.get("image_description")]
+        metadata.extend(os.path.basename(str(path)) for path in input_paths)
+        return "\n".join(str(value) for value in metadata if value)
+    return read_analysis_input_text(data)
+
+
+def _local_ocr_enabled():
+    """处理 _local_ocr_enabled 对应的业务步骤，并向调用方返回所需结果。"""
+    configured = app.config.get("LOCAL_OCR_ENABLED", os.getenv("LOCAL_OCR_ENABLED", "true"))
+    return str(configured).strip().lower() not in {"0", "false", "no", "off"}
+
+
+def _empty_image_ocr_result(warning=""):
+    """处理 _empty_image_ocr_result 对应的业务步骤，并向调用方返回所需结果。"""
+    return {
+        "available": False,
+        "engine": "paddleocr",
+        "extracted_text": "",
+        "lines": [],
+        "average_confidence": 0.0,
+        "warnings": [warning] if warning else [],
+    }
+
+
+def normalize_image_ocr_payload(payload):
+    """规范化并返回 normalize_image_ocr_payload 对应的业务数据，保持现有调用约定。"""
+    data = payload if isinstance(payload, dict) else {}
+    lines = []
+    for item in data.get("lines") or []:
+        if not isinstance(item, dict):
+            continue
+        text = str(item.get("text") or "").strip()
+        if not text:
+            continue
+        try:
+            confidence = float(item.get("confidence") or 0.0)
+        except (TypeError, ValueError):
+            confidence = 0.0
+        lines.append({
+            "text": text,
+            "confidence": confidence,
+            "image_index": int(item.get("image_index") or 0),
+            "line_index": int(item.get("line_index") or 0),
+        })
+    try:
+        average_confidence = float(data.get("average_confidence") or 0.0)
+    except (TypeError, ValueError):
+        average_confidence = 0.0
+    return {
+        "available": bool(data.get("available")),
+        "engine": str(data.get("engine") or "paddleocr"),
+        "extracted_text": str(data.get("extracted_text") or "").strip(),
+        "lines": lines,
+        "average_confidence": average_confidence,
+        "warnings": [str(item) for item in (data.get("warnings") or []) if str(item or "").strip()],
+    }
+
+
+def build_chain_relevance_context(data, ocr_extractor=None):
+    """构建并返回 build_chain_relevance_context 对应的业务数据，保持现有调用约定。"""
+    metadata_text = build_chain_relevance_input(data)
+    if str(data.get("source_type") or "file").lower() != "image":
+        return metadata_text, None
+
+    supplied_ocr = normalize_image_ocr_payload(data.get("image_ocr"))
+    if supplied_ocr.get("extracted_text"):
+        return "\n".join(filter(None, [supplied_ocr["extracted_text"], metadata_text])), supplied_ocr
+    if not _local_ocr_enabled():
+        ocr_result = _empty_image_ocr_result("local OCR is disabled")
+        return metadata_text, ocr_result
+
+    input_paths = [path for path in (data.get("file_paths") or []) if path]
+    if data.get("file_path") and data.get("file_path") not in input_paths:
+        input_paths.insert(0, data.get("file_path"))
+    try:
+        if ocr_extractor is None:
+            from app.analysis.image_ocr import extract_text_from_images
+            ocr_extractor = extract_text_from_images
+        minimum_confidence = float(
+            app.config.get("OCR_MIN_CONFIDENCE", os.getenv("OCR_MIN_CONFIDENCE", "0.45"))
+        )
+        try:
+            raw_result = ocr_extractor(input_paths, min_confidence=minimum_confidence)
+        except TypeError:
+            raw_result = ocr_extractor(input_paths)
+        ocr_result = normalize_image_ocr_payload(raw_result)
+    except Exception as exc:
+        logging.exception("Local OCR context extraction failed")
+        ocr_result = _empty_image_ocr_result(str(exc))
+    source_text = "\n".join(filter(None, [ocr_result.get("extracted_text"), metadata_text]))
+    return source_text, ocr_result
+
+
+def cleanup_discovery_workspace(repo_path, workspace_id, repo_base_dir="/tmp/log-analyzer-repos"):
+    """清理 cleanup_discovery_workspace 对应的业务数据，保持现有调用约定。"""
+    if not repo_path or not workspace_id:
+        return False
+    real_base = os.path.realpath(repo_base_dir)
+    workspace_path = os.path.realpath(os.path.join(real_base, str(workspace_id)))
+    real_repo = os.path.realpath(repo_path)
+    try:
+        if (
+            os.path.basename(workspace_path) == str(workspace_id)
+            and os.path.commonpath([workspace_path, real_base]) == real_base
+            and os.path.commonpath([real_repo, workspace_path]) == workspace_path
+            and os.path.isdir(workspace_path)
+        ):
+            shutil.rmtree(workspace_path)
+            return True
+    except (OSError, ValueError):
+        logging.exception("\u6e05\u7406\u5173\u8054\u6a21\u5757\u8bc6\u522b\u4e34\u65f6\u4ed3\u5e93\u5931\u8d25\uff1a%s", workspace_path)
+    return False
+
+
+@analysis_bp.route("/discover_related_modules", methods=["POST"])
+def discover_related_modules_route():
+    """查找或推断并返回 discover_related_modules_route 对应的业务数据，保持现有调用约定。"""
+    data = request.json or {}
+    source_type = str(data.get("source_type") or "file").lower()
+    if source_type == "image" and data.get("file_paths") and not data.get("file_path"):
+        data["file_path"] = data.get("file_paths")[0]
+
+    required_fields = ["productId", "moduleId", "branchAddress", "tagVersion"]
+    missing_fields = [field for field in required_fields if not data.get(field)]
+    if missing_fields:
+        return jsonify({"error": "\u7f3a\u5c11\u5fc5\u8981\u5b57\u6bb5", "missing_fields": missing_fields}), 400
+
+    source_text, image_ocr = build_chain_relevance_context(data)
+    decision = assess_chain_relevance(source_text)
+    if image_ocr is not None:
+        decision["imageOcr"] = image_ocr
+    if source_type == "image" and image_ocr is not None and not image_ocr.get("available"):
+        warnings = image_ocr.get("warnings") or []
+        decision.update({
+            "status": "image_ocr_unavailable",
+            "requiresRelatedEvidence": False,
+            "chainAssessmentComplete": False,
+            "message": "本地图片文字识别不可用，无法在分析前判断上下游链路；将保留原图进入综合分析。",
+            "reason": "；".join(str(item) for item in warnings if str(item).strip())
+            or "本地 OCR 未返回可用结果。",
+        })
+        return jsonify(decision)
+    if decision.get("requiresRelatedEvidence"):
+        available_modules = get_available_modules_for_product(data.get("productId"))
+        issue_candidates = split_chain_issue_candidates(
+            source_text,
+            available_modules,
+            primary_module_id=data.get("moduleId"),
+        )
+        if issue_candidates:
+            first_candidate = issue_candidates[0]
+            decision["issueSummary"] = first_candidate.get("issueSummary") or decision.get("issueSummary")
+            decision["matchedSignals"] = first_candidate.get("matchedSignals") or decision.get("matchedSignals", [])
+            decision["relatedModules"] = first_candidate.get("relatedModules", [])
+            decision["issueCandidates"] = issue_candidates
+        else:
+            decision["relatedModules"] = discover_related_modules_from_text(
+                source_text,
+                available_modules,
+                primary_module_id=data.get("moduleId"),
+            )
+            decision["issueCandidates"] = [{
+                "index": 0,
+                "issueSummary": decision.get("issueSummary"),
+                "matchedSignals": decision.get("matchedSignals", []),
+                "relatedModules": decision.get("relatedModules", []),
+                "reason": decision.get("reason"),
+            }]
+    return jsonify(decision)
+
+
+@analysis_bp.route("/assess_related_code", methods=["POST"])
+def assess_related_code_route():
+    """执行故障分析并返回 assess_related_code_route 对应的业务数据，保持现有调用约定。"""
+    data = request.json or {}
+    source_type = str(data.get("source_type") or "file").lower()
+    if source_type == "image" and data.get("file_paths") and not data.get("file_path"):
+        data["file_path"] = data.get("file_paths")[0]
+
+    required_fields = ["productId", "moduleId", "branchAddress", "tagVersion"]
+    missing_fields = [field for field in required_fields if not data.get(field)]
+    if missing_fields:
+        return jsonify({"error": "缺少必要字段", "missing_fields": missing_fields}), 400
+
+    source_text, image_ocr = build_chain_relevance_context(data)
+    chain_decision = assess_chain_relevance(source_text)
+    if image_ocr is not None:
+        chain_decision["imageOcr"] = image_ocr
+    if not chain_decision.get("requiresRelatedEvidence"):
+        return jsonify(chain_decision)
+
+    related_modules = data.get("relatedModules") or []
+    if not related_modules:
+        return jsonify({
+            "status": "need_related_code",
+            "requiresRelatedEvidence": False,
+            "requiresRelatedCode": True,
+            "message": "此问题可能涉及上下游链路，请先选择上下游模块的发布分支/Tag。",
+            "reason": chain_decision.get("reason"),
+            "issueSummary": chain_decision.get("issueSummary"),
+            "matchedSignals": chain_decision.get("matchedSignals", []),
+        })
+
+    workspace_id = f"related-code-{hashlib.md5(json.dumps(data, sort_keys=True, default=str).encode('utf-8')).hexdigest()[:12]}"
+    repositories = build_analysis_repositories(data, workspace_id)
+    cloned_repositories = clone_analysis_repositories(repositories, clone_git_repo, max_workers=4)
+    try:
+        assessment = assess_related_code_ownership(source_text, chain_decision, cloned_repositories)
+        cloned_keys = {
+            (repository.get("role"), str(repository.get("moduleId")), repository.get("branchAddress"), repository.get("tagVersion"))
+            for repository in cloned_repositories
+        }
+        repository_issues = []
+        for repository in repositories:
+            key = (repository.get("role"), str(repository.get("moduleId")), repository.get("branchAddress"), repository.get("tagVersion"))
+            if repository.get("role") == "primary" or key in cloned_keys:
+                continue
+            repository_issues.append({
+                "moduleId": repository.get("moduleId"),
+                "moduleName": repository.get("moduleName"),
+                "role": repository.get("role"),
+                "branchAddress": repository.get("branchAddress"),
+                "tagVersion": repository.get("tagVersion"),
+                "message": "模块代码拉取失败，可能是仓库不存在、分支/Tag 不存在或当前 Git 账号无权限。",
+            })
+        if repository_issues:
+            assessment["repositoryIssues"] = repository_issues
+            if not assessment.get("requiresRelatedEvidence"):
+                assessment["message"] = "部分上下游模块代码拉取失败，请补充仓库权限或跳过该模块后继续分析。"
+        assessment["issueSummary"] = chain_decision.get("issueSummary")
+        assessment["matchedSignals"] = chain_decision.get("matchedSignals", [])
+        assessment["repositories"] = [
+            {
+                "moduleId": repository.get("moduleId"),
+                "moduleName": repository.get("moduleName"),
+                "role": repository.get("role"),
+                "branchAddress": repository.get("branchAddress"),
+                "tagVersion": repository.get("tagVersion"),
+            }
+            for repository in repositories
+        ]
+        return jsonify(assessment)
+    finally:
+        for repository in cloned_repositories:
+            cleanup_discovery_workspace(repository.get("repo_path"), workspace_id)
+
+
+def annotate_code_snippets(snippets, repository):
+    """格式化或整理并返回 annotate_code_snippets 对应的业务数据，保持现有调用约定。"""
+    annotated = []
+    for snippet in snippets or []:
+        if not isinstance(snippet, dict):
+            continue
+        item = dict(snippet)
+        item["module_role"] = repository.get("role")
+        item["module_id"] = repository.get("moduleId")
+        item["module_name"] = repository.get("moduleName")
+        annotated.append(item)
+    return annotated
+
+
 def merge_code_snippets(*snippet_groups):
+    """合并整理并返回 merge_code_snippets 对应的业务数据，保持现有调用约定。"""
     merged = []
     seen = set()
     for snippets in snippet_groups:
@@ -1123,6 +2617,7 @@ def merge_code_snippets(*snippet_groups):
 
 
 def format_numbered_snippet(snippet_lines, start_line, target_line):
+    """格式化或整理并返回 format_numbered_snippet 对应的业务数据，保持现有调用约定。"""
     formatted_lines = []
     for offset, raw_line in enumerate(snippet_lines):
         line_number = start_line + offset
@@ -1132,6 +2627,7 @@ def format_numbered_snippet(snippet_lines, start_line, target_line):
 
 
 def build_code_findings(code_snippets):
+    """构建并返回 build_code_findings 对应的业务数据，保持现有调用约定。"""
     findings = []
     for snippet in code_snippets or []:
         if not isinstance(snippet, dict):
@@ -1148,30 +2644,59 @@ def build_code_findings(code_snippets):
             "reason": reason,
             "code": code,
             "component": snippet.get("component"),
+            "module_role": snippet.get("module_role"),
+            "module_id": snippet.get("module_id"),
+            "module_name": snippet.get("module_name"),
         })
     return findings
 
 
-def analyze_code_with_deepseek(log_content, log_analysis, code_snippets, image_analysis=None):
+def analyze_code_with_deepseek(
+    log_content,
+    log_analysis,
+    code_snippets,
+    image_analysis=None,
+    image_paths=None,
+):
+    """执行故障分析并返回 analyze_code_with_deepseek 对应的业务数据，保持现有调用约定。"""
     logging.info("==> \u8fdb\u5165 analyze_code_with_deepseek")
     context_lines = []
     for snippet in code_snippets:
+        module_label = ""
+        if snippet.get("module_name"):
+            module_role = snippet.get("module_role") or "related"
+            module_label = f"[{module_role} {snippet.get('module_name')}] "
         context_lines.append(
-            f"\u6587\u4ef6\uff1a{snippet['file']} \u7b2c {snippet['line']} \u884c\u9644\u8fd1\n```\n{snippet.get('numbered_snippet') or snippet['snippet']}\n```"
+            f"{module_label}\u6587\u4ef6\uff1a{snippet['file']} \u7b2c {snippet['line']} \u884c\u9644\u8fd1\n```\n{snippet.get('numbered_snippet') or snippet['snippet']}\n```"
         )
     context = "\n".join(context_lines)
     fallback_context = "\u672a\u5b9a\u4f4d\u5230\u76f8\u5173\u4ee3\u7801\u7247\u6bb5"
     log_context = build_compact_log_context(log_content)
     image_context = ""
+    image_error_instruction = ""
     if image_analysis:
         image_context = f"\n\n\u3010\u56fe\u7247\u8bc6\u522b\u6458\u8981\u3011\n{build_image_analysis_context(image_analysis, image_analysis.get('image_description', ''))}"
+    if image_paths:
+        image_labels = "、".join(f"第{index}张" for index in range(1, len(image_paths) + 1))
+        image_error_instruction = (
+            f"当前请求包含 {len(image_paths)} 张原始图片（{image_labels}）。"
+            "不能因为本地 OCR 未识别到文字或初步日志分析为 0 个问题，就判断图片中没有错误；"
+            "必须逐个识别原图中所有可见的错误、异常提示和失败状态，并在每个 issue 的 evidence 中"
+            "注明来源图片序号。每张图片至少要有一个 issue 覆盖；只有明确确认是同一错误的重复截图时"
+            "才允许合并，并说明合并依据。即使 image_tag 是 business_image，只要画面中存在日志、"
+            "异常栈或明确报错文本，也必须按错误截图处理。\n"
+        )
 
     prompt = (
         "\u8bf7\u57fa\u4e8e\u3010\u5b8c\u6574\u65e5\u5fd7\u4e0a\u4e0b\u6587\u3011\u3001\u3010\u65e5\u5fd7\u521d\u6b65\u5206\u6790\u3011\u548c\u3010\u76f8\u5173\u4ee3\u7801\u7247\u6bb5\u3011\u505a\u6700\u7ec8\u7ed3\u8bba\u3002\n"
         "\u91cd\u8981\u539f\u5219\uff1a\u4e0d\u8981\u53ea\u6839\u636e ERROR \u884c\u5224\u65ad\uff1b\u5fc5\u987b\u7ed3\u5408\u9519\u8bef\u524d\u540e\u7684 INFO/WARN/DEBUG\u3001\u8bf7\u6c42\u94fe\u8def\u3001\u914d\u7f6e\u52a0\u8f7d\u3001\u8fde\u63a5\u72b6\u6001\u3001\u91cd\u8bd5\u3001\u8017\u65f6\u548c\u8d44\u6e90\u53d8\u5316\u3002\n"
         "\u4ee3\u7801\u7247\u6bb5\u662f\u5173\u952e\u8bc1\u636e\uff0c\u4f46\u6ca1\u6709\u4ee3\u7801\u8bc1\u636e\u5e76\u4e0d\u4ee3\u8868\u4e00\u5b9a\u4e0d\u662f\u914d\u7f6e\u3001\u7f51\u7edc\u3001\u6570\u636e\u3001\u4f9d\u8d56\u6216\u8d44\u6e90\u95ee\u9898\u3002\n"
         "\u5982\u679c\u5224\u65ad\u4e3a\u4ee3\u7801\u95ee\u9898\uff0c\u5fc5\u987b\u6307\u51fa\u5177\u4f53\u6587\u4ef6\u3001\u884c\u53f7\u3001\u76f8\u5173\u4ee3\u7801\u5757\u548c\u4e3a\u4ec0\u4e48\u8fd9\u6bb5\u4ee3\u7801\u4f1a\u89e6\u53d1\u65e5\u5fd7\u4e2d\u7684\u73b0\u8c61\u3002\n"
+        "\u5982\u679c\u4ee3\u7801\u7247\u6bb5\u6765\u81ea\u591a\u4e2a\u6a21\u5757\uff0c\u5fc5\u987b\u533a\u5206\u4e3b\u6a21\u5757\u3001\u4e0a\u4e0b\u6e38/\u5173\u8054\u6a21\u5757\u7684\u8d23\u4efb\u8fb9\u754c\uff0c\u8bf4\u660e\u662f\u53c2\u6570\u4f20\u9012\u3001\u53d1\u5e03/\u8c03\u5ea6\u3001\u56de\u8c03\u5904\u7406\u8fd8\u662f\u4e3b\u6a21\u5757\u81ea\u8eab\u903b\u8f91\u89e6\u53d1\u3002\n"
         "\u5982\u679c\u5224\u65ad\u53ef\u80fd\u662f\u914d\u7f6e/\u7f51\u7edc/\u6570\u636e/\u4f9d\u8d56/\u8d44\u6e90\u95ee\u9898\uff0c\u4e5f\u8981\u8bf4\u660e\u65e5\u5fd7\u4f9d\u636e\u4ee5\u53ca\u9700\u8981\u8865\u5145\u68c0\u67e5\u7684\u914d\u7f6e\u9879\u3001\u7f51\u7edc\u94fe\u8def\u3001\u6570\u636e\u6837\u672c\u6216\u5916\u90e8\u670d\u52a1\u3002\n"
+        f"{image_error_instruction}"
+        "必须把【全量错误清单】里的错误按语义分组为 issues 数组。每个独立问题输出为一个对象：问题1、问题2、问题3...；不要只给一个总括结论。\n"
+        "每个 issue 必须包含 title、summary、root_cause、solution、evidence、query_commands、fix_commands、code_locations。code_locations 里写明 file、line、reason；如果没有代码证据也必须说明 reason。\n"
         "\u8bf7\u53ea\u8fd4\u56de JSON\uff0c\u4e0d\u8981\u8fd4\u56de Markdown\u3002JSON \u5b57\u6bb5\u5fc5\u987b\u5305\u542b\uff1a\n"
         "- issue_category: code_issue/data_issue/config_issue/network_issue/dependency_issue/resource_issue/unknown \u4e4b\u4e00\n"
         "- conclusion_summary: \u4e00\u53e5\u8bdd\u7ed3\u8bba\n"
@@ -1182,6 +2707,7 @@ def analyze_code_with_deepseek(log_content, log_analysis, code_snippets, image_a
         "- query_commands: \u5b57\u7b26\u4e32\u6570\u7ec4\uff0c\u7ed9\u51fa\u53ef\u76f4\u63a5\u6267\u884c\u7684\u6392\u67e5/\u67e5\u8be2\u547d\u4ee4\uff0c\u6bd4\u5982 grep\u3001redis-cli\u3001mysql\u3001curl\u3001kubectl \u7b49\n"
         "- fix_commands: \u5b57\u7b26\u4e32\u6570\u7ec4\uff0c\u7ed9\u51fa\u53ef\u76f4\u63a5\u6267\u884c\u7684\u4fee\u590d/\u7f13\u89e3\u547d\u4ee4\uff0c\u5982\u679c\u4e0d\u5e94\u76f4\u63a5\u6267\u884c\u5219\u7ed9\u51fa\u5b89\u5168\u66ff\u4ee3\u65b9\u6848\n"
         "- evidence: \u5b57\u7b26\u4e32\u6570\u7ec4\uff0c\u5217\u51fa\u5224\u65ad\u4f9d\u636e\uff0c\u4f18\u5148\u5305\u542b\u65e5\u5fd7\u4e0a\u4e0b\u6587\u3001\u4ee3\u7801\u6587\u4ef6\u3001\u884c\u53f7\u3001\u4ee3\u7801\u7247\u6bb5\u8bf4\u660e\n\n"
+        "- issues: 数组，每个元素表示一个独立问题，字段包含 title、issue_category、summary、root_cause、solution、confidence、evidence、query_commands、fix_commands、code_locations\n\n"
         f"{log_context}\n\n"
         f"\u3010\u65e5\u5fd7\u521d\u6b65\u5206\u6790\u3011\n{log_analysis}"
         f"{image_context}\n\n"
@@ -1196,15 +2722,23 @@ def analyze_code_with_deepseek(log_content, log_analysis, code_snippets, image_a
 
     try:
         logging.info("\u8c03\u7528 AI \u6267\u884c\u4ee3\u7801\u4e0e\u65e5\u5fd7\u7684\u7efc\u5408\u5206\u6790")
-        result = call_ai_model("\u4f60\u662f\u4e00\u4e2a\u7ecf\u9a8c\u4e30\u5bcc\u7684\u540e\u7aef\u6545\u969c\u5b9a\u4f4d\u4e13\u5bb6\u3002", prompt)
+        system_prompt = "\u4f60\u662f\u4e00\u4e2a\u7ecf\u9a8c\u4e30\u5bcc\u7684\u540e\u7aef\u6545\u969c\u5b9a\u4f4d\u4e13\u5bb6\u3002"
+        if image_paths:
+            image_data_urls = [build_image_data_url(path) for path in image_paths if path]
+            result = call_ai_multimodal_model(system_prompt, prompt, image_data_urls)
+        else:
+            result = call_ai_model(system_prompt, prompt)
         logging.info("AI \u7efc\u5408\u5206\u6790\u6210\u529f")
         return result
+    except AiServiceError:
+        raise
     except Exception as exc:
         logging.exception("\u8c03\u7528 AI \u8fdb\u884c\u4ee3\u7801\u5206\u6790\u5931\u8d25\uff1a%s", exc)
         return "\u4ee3\u7801\u5206\u6790\u5931\u8d25\uff0c\u65e0\u6cd5\u5b9a\u4f4d\u5177\u4f53\u9519\u8bef"
 
 
 def insert_query_record(data, answer_status, **extra):
+    """保存 insert_query_record 对应的业务数据，保持现有调用约定。"""
     try:
         query_record = QueryRecord(
             product_id=data.get("productId"),

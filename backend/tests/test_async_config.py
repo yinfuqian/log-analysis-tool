@@ -20,6 +20,23 @@ def load_config_module():
 
 
 class AsyncConfigTests(unittest.TestCase):
+    def test_fault_analysis_model_and_reasoning_effort_are_environment_driven(self):
+        env = {
+            "OPENAI_MODEL": "gpt-5.6-sol",
+            "OPENAI_REASONING_EFFORT": "high",
+        }
+        with patch.dict(os.environ, env, clear=False):
+            config = load_config_module().Config
+
+        self.assertEqual(config.OPENAI_MODEL, "gpt-5.6-sol")
+        self.assertEqual(config.OPENAI_REASONING_EFFORT, "high")
+
+    def test_fault_analysis_model_defaults_are_declared_in_config_source(self):
+        source = CONFIG_PATH.read_text(encoding="utf-8")
+
+        self.assertIn('os.getenv("OPENAI_MODEL", "gpt-5.6-sol")', source)
+        self.assertIn('os.getenv("OPENAI_REASONING_EFFORT", "high")', source)
+
     def test_database_defaults_to_requested_mysql_database(self):
         env = {
             "MYSQL_HOST": "180.184.70.137",
@@ -102,6 +119,22 @@ class AsyncConfigTests(unittest.TestCase):
         self.assertEqual(config.AUTH_USERS_FILE, "C:/secure/users.json")
         self.assertEqual(config.AUTH_LOGIN_MAX_FAILURES, 7)
         self.assertEqual(config.AUTH_LOGIN_WINDOW_SECONDS, 420)
+
+    def test_default_auth_users_file_is_the_project_users_csv(self):
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("AUTH_USERS_FILE", None)
+            config = load_config_module().Config
+
+        project_root = Path(__file__).resolve().parents[2]
+        self.assertEqual(Path(config.AUTH_USERS_FILE), project_root / "users.csv")
+        self.assertTrue(Path(config.AUTH_USERS_FILE).exists())
+
+    def test_relative_auth_users_file_is_resolved_from_backend_directory(self):
+        with patch.dict(os.environ, {"AUTH_USERS_FILE": "../users.csv"}, clear=False):
+            config = load_config_module().Config
+
+        project_root = Path(__file__).resolve().parents[2]
+        self.assertEqual(Path(config.AUTH_USERS_FILE), project_root / "users.csv")
 
     def test_dotenv_loader_sets_missing_values_without_overriding_existing_env(self):
         module = load_config_module()

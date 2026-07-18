@@ -1,3 +1,4 @@
+"""service 模块负责本文件相关的业务流程、数据转换与依赖协作。"""
 import secrets
 import time
 
@@ -10,13 +11,17 @@ from .models import UserOperationLog
 
 
 def persist_operation_audit(row):
-    db.session.add(UserOperationLog(**row))
-    db.session.commit()
+    """使用独立事务保存审计记录，避免与当前业务请求的数据库会话互相影响。"""
+    statement = UserOperationLog.__table__.insert().values(**row)
+    with db.engine.begin() as connection:
+        connection.execute(statement)
 
 
 def install_operation_audit(app, writer=persist_operation_audit):
+    """注册或配置 install_operation_audit 对应的业务数据，保持现有调用约定。"""
     @app.before_request
     def begin_operation_audit():
+        """处理 begin_operation_audit 对应的业务步骤，并向调用方返回所需结果。"""
         if request.method == "OPTIONS" or request.path.startswith("/health/") or request.endpoint == "static":
             g.audit_skip = True
             return None
@@ -31,6 +36,7 @@ def install_operation_audit(app, writer=persist_operation_audit):
 
     @app.after_request
     def finish_operation_audit(response):
+        """处理 finish_operation_audit 对应的业务步骤，并向调用方返回所需结果。"""
         if getattr(g, "audit_skip", True):
             return response
         request_id = g.audit_request_id

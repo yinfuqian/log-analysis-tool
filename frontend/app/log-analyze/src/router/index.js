@@ -1,3 +1,4 @@
+/** index 模块负责前端数据访问、状态处理或页面配置。 */
 import { createRouter, createWebHistory } from 'vue-router';
 import LogDashboard from '@/views/LogDashboard.vue';
 import SystemManage from '@/views/SystemManage.vue';

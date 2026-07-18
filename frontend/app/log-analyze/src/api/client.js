@@ -1,3 +1,4 @@
+/** client 模块负责前端数据访问、状态处理或页面配置。 */
 import axios from 'axios'
 
 import { clearToken, getToken } from '@/auth/session'

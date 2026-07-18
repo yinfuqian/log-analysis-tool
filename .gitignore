@@ -31,6 +31,9 @@ build/
 dist/
 **/build/
 **/dist/
+# 前端 build 目录包含 Webpack 源码辅助文件，不属于构建产物。
+!frontend/app/log-analyze/build/
+!frontend/app/log-analyze/build/**
 *.spec
 !windows-client/LogAnalyzerClient-macos.spec
 project-info-output.tar.gz
