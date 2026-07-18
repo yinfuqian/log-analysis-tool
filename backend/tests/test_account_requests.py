@@ -15,23 +15,27 @@ from app.auth.routes import auth_bp
 class FakeResponse:
     status_code = 200
 
+    def __init__(self, payload=None):
+        self.payload = payload or {"msg": "操作成功", "code": 200}
+
     def raise_for_status(self):
         return None
 
     def json(self):
-        return {"message_id": "remote-1"}
+        return self.payload
 
 
 class FakeHttpSession:
-    def __init__(self, error=None):
+    def __init__(self, error=None, response=None):
         self.error = error
+        self.response = response or FakeResponse()
         self.calls = []
 
     def post(self, url, **kwargs):
         self.calls.append((url, kwargs))
         if self.error:
             raise self.error
-        return FakeResponse()
+        return self.response
 
 
 class AccountRequestTests(unittest.TestCase):
@@ -45,7 +49,7 @@ class AccountRequestTests(unittest.TestCase):
         self.assertEqual(result["delivery_status"], "accepted")
         self.assertNotIn("password", result)
 
-    def test_http_provider_forwards_complete_payload_and_bearer_token(self):
+    def test_http_provider_maps_account_request_to_send_email_fields(self):
         session = FakeHttpSession()
         provider = HttpAccountRequestProvider(
             "https://notify.example/apply",
@@ -53,15 +57,32 @@ class AccountRequestTests(unittest.TestCase):
             timeout=7,
             session=session,
         )
-        payload = {"username": "alice", "password": "secret", "applicant_name": "张三"}
+        payload = {
+            "request_id": "AR-1",
+            "requested_at": "2026-07-18T17:00:00+08:00",
+            "username": "alice",
+            "password": "secret",
+            "applicant_name": "张三",
+        }
 
         result = provider.send(payload)
 
-        self.assertEqual(result["message_id"], "remote-1")
+        self.assertEqual(result["code"], 200)
         _, kwargs = session.calls[0]
-        self.assertEqual(kwargs["json"], payload)
+        self.assertEqual(kwargs["json"], {
+            "register_account": "alice",
+            "register_user": "张三",
+            "register_pwd": "secret",
+        })
         self.assertEqual(kwargs["headers"]["Authorization"], "Bearer api-token")
         self.assertEqual(kwargs["timeout"], 7)
+
+    def test_http_provider_rejects_failed_application_status(self):
+        session = FakeHttpSession(response=FakeResponse({"msg": "操作失败", "code": 500}))
+        provider = HttpAccountRequestProvider("https://notify.example/apply", session=session)
+
+        with self.assertRaisesRegex(AccountRequestError, "请联系管理员"):
+            provider.send({"username": "alice", "password": "secret", "applicant_name": "张三"})
 
     def test_http_failure_becomes_safe_account_request_error(self):
         provider = HttpAccountRequestProvider(

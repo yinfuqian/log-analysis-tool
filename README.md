@@ -103,6 +103,18 @@ ACCOUNT_REQUEST_API_TOKEN=请填写
 ACCOUNT_REQUEST_API_TIMEOUT=10
 ```
 
+HTTP 提供方会转换为邮件接口需要的 JSON 字段：
+
+```json
+{
+  "register_account": "申请的用户名",
+  "register_user": "申请人姓名",
+  "register_pwd": "申请密码"
+}
+```
+
+接口返回 HTTP 成功且 JSON 中 `code=200` 时才视为发送成功；其他情况统一向客户端提示“账号申请失败，请联系管理员”。
+
 申请内容包含用户名、密码、申请人姓名，以及服务端自动生成的申请编号和时间。调用失败时客户端直接提示联系管理员，不在本地保存申请记录。
 
 ## 模型与深度推理

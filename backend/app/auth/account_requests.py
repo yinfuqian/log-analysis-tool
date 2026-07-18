@@ -38,10 +38,15 @@ class HttpAccountRequestProvider:
         headers = {"Content-Type": "application/json"}
         if self.token:
             headers["Authorization"] = f"Bearer {self.token}"
+        outbound_payload = {
+            "register_account": payload.get("username"),
+            "register_user": payload.get("applicant_name"),
+            "register_pwd": payload.get("password"),
+        }
         try:
             response = self.session.post(
                 self.url,
-                json=payload,
+                json=outbound_payload,
                 headers=headers,
                 timeout=self.timeout,
             )
@@ -49,7 +54,9 @@ class HttpAccountRequestProvider:
             result = response.json()
         except (httpx.HTTPError, ValueError, TypeError) as exc:
             raise AccountRequestError("账号申请失败，请联系管理员") from exc
-        return result if isinstance(result, dict) else {}
+        if not isinstance(result, dict) or str(result.get("code")) != "200":
+            raise AccountRequestError("账号申请失败，请联系管理员")
+        return result
 
 
 class AccountRequestService:
