@@ -18,3 +18,4 @@ build
 dist
 .git
 .idea
+users.csv

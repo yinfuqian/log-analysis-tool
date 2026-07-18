@@ -187,6 +187,95 @@ docker build --progress=plain -t fault-analysis-frontend:test frontend
 docker run --rm fault-analysis-frontend:test nginx -t
 ```
 
+## 本地开发与生产镜像发布
+
+本项目明确区分两套 Compose 流程：
+
+- `docker-compose.yml` 用于本地开发和发布机构建，包含 `build`，源码修改后可执行 `docker compose up -d --build`。
+- `docker-compose.prod.yml` 只用于生产运行，不包含 `build`，生产服务器不需要也不应该保存源码仓库或完整源码包。镜像仍会包含程序运行所需的应用文件，因此镜像仓库权限必须严格控制；Docker 镜像本身不是加密或防反编译方案。
+
+### 本地开发
+
+使用外部 MySQL、Redis 时：
+
+```powershell
+Copy-Item .env.example .env
+docker compose up -d --build
+```
+
+需要本地同时启动 MySQL、Redis 时：
+
+```powershell
+docker compose --profile local-deps up -d --build
+```
+
+### 构建并推送发布镜像
+
+在开发机或专用发布机执行，版本号应使用不可变版本，不要使用 `latest`：
+
+```powershell
+# 同时构建后端和前端。
+powershell -ExecutionPolicy Bypass -File scripts\build_release_images.ps1 all `
+  -Version 2026.07.18-1 `
+  -Registry registry.example.com `
+  -Push
+
+# 只更新后端时只构建后端镜像。
+powershell -ExecutionPolicy Bypass -File scripts\build_release_images.ps1 backend `
+  -Version 2026.07.18-2 `
+  -Registry registry.example.com `
+  -Push
+```
+
+后端的 `migrate`、`api`、`worker` 共用一个后端镜像；前端使用独立镜像。因此后端代码变化只发布一个后端镜像，前端代码变化只发布一个前端镜像。
+
+### 生成精简生产部署包
+
+首次部署或生产 Compose、配置模板发生变化时生成部署包：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\package_production_deploy.ps1 -Version 2026.07.18-1
+```
+
+生成的 ZIP 只包含：
+
+- `docker-compose.prod.yml`
+- `.env.production.example`
+- `users.example.csv`
+- `README.md`
+
+部署包不包含 `backend`、`frontend`、`windows-client` 或其他源码目录。
+
+### 生产服务器更新
+
+生产服务器首次部署时，把 `.env.production.example` 复制为 `.env.production`，把 `users.example.csv` 复制为 `users.csv`，填写真实配置后执行：
+
+```bash
+docker compose --env-file .env.production -f docker-compose.prod.yml pull
+docker compose --env-file .env.production -f docker-compose.prod.yml up -d
+```
+
+以后正常更新不再复制源码包。只需修改 `.env.production` 中发生变化的镜像版本，然后拉取并重建对应容器：
+
+```bash
+# 只更新后端；迁移、API 和 Worker 使用同一镜像一起更新。
+docker compose --env-file .env.production -f docker-compose.prod.yml pull migrate api worker
+docker compose --env-file .env.production -f docker-compose.prod.yml up -d migrate api worker
+
+# 只更新前端。
+docker compose --env-file .env.production -f docker-compose.prod.yml pull frontend
+docker compose --env-file .env.production -f docker-compose.prod.yml up -d frontend
+```
+
+离线生产环境可以逐个导出发生变化的镜像：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\export_release_image.ps1 `
+  -Image registry.example.com/fault-analysis/backend:2026.07.18-2
+```
+
+把生成的 `.tar` 和 `.sha256` 文件传到生产服务器，核验后执行 `docker load -i <镜像文件.tar>`，再运行对应的 `up -d` 命令即可。完整操作见 `deploy/README.md`。
+
 ## Git 与外部基础设施
 
 GitLab 或 Git 服务配置保存在 `.env`。不要把真实令牌提交到仓库：

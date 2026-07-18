@@ -1,18 +1,19 @@
-# 故障分析工具后端生产镜像：构建成功代表 API、Worker、Git 和 OCR 均通过自检。
+# 故障分析工具后端镜像采用多阶段构建，最终运行镜像不携带测试、配置和默认用户密码文件。
 ARG PYTHON_BASE_IMAGE=docker.m.daocloud.io/library/python:3.10-slim-bookworm
-FROM ${PYTHON_BASE_IMAGE}
+
+FROM ${PYTHON_BASE_IMAGE} AS base
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
     FLASK_APP=app.py \
-    AUTH_USERS_FILE=/app/users.csv \
+    AUTH_USERS_FILE=/data/users.csv \
     PADDLE_PDX_CACHE_HOME=/data/paddle-cache \
     REPO_CACHE_DIR=/tmp/fault-analyzer-repos
 
 WORKDIR /app
 
-# 镜像源均可通过构建参数替换，便于内网或离线镜像仓库使用。
+# 系统镜像源和 Python 镜像源都允许在企业网络中通过构建参数替换。
 ARG APT_MIRROR=https://mirrors.aliyun.com/debian
 ARG PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
 RUN if [ -f /etc/apt/sources.list.d/debian.sources ]; then \
@@ -24,7 +25,9 @@ RUN if [ -f /etc/apt/sources.list.d/debian.sources ]; then \
     && apt-get install -y --no-install-recommends git ca-certificates curl libgomp1 libgl1 libglib2.0-0 \
     && rm -rf /var/lib/apt/lists/*
 
-# 先复制依赖文件以复用 Docker 缓存，再复制业务源码。
+FROM base AS build
+
+# 构建阶段安装完整依赖并复制源码，用于编译检查、应用检查、Worker 检查和真实 OCR 预测。
 COPY requirements.txt requirements-ocr.txt ./
 RUN python -m pip install --upgrade pip \
     && python -m pip install -i "${PIP_INDEX_URL}" -r requirements.txt \
@@ -32,15 +35,38 @@ RUN python -m pip install --upgrade pip \
 
 COPY . .
 
-# Windows 构建上下文可能把 Shell 脚本转换为 CRLF；先统一恢复为 Linux LF，再设置执行权限。
-# 构建期随后执行完整自检。OCR 模型会下载到镜像目录，并在首次挂载命名卷时自动初始化到卷中。
+# 使用示例用户表完成构建自检；该文件不会复制到最终运行镜像。
 RUN find /app -type f -name '*.sh' -exec sed -i 's/\r$//' {} + \
     && chmod +x /app/docker-entrypoint.sh /app/migrate_db.sh /app/start.sh /app/start_worker.sh \
     && mkdir -p /data/upload /data/paddle-cache /app/app/logs /tmp/fault-analyzer-repos \
     && python -m pip check \
-    && python -m compileall -q app.py celery_worker.py app bootstrap_schema.py init_database.py verify_runtime.py \
-    && python verify_runtime.py --build \
-    && python verify_runtime.py --ocr
+    && python -m compileall -q app.py celery_worker.py extensions.py app bootstrap_schema.py init_database.py manage_users.py verify_runtime.py \
+    && AUTH_USERS_FILE=/app/users.example.csv python verify_runtime.py --build \
+    && AUTH_USERS_FILE=/app/users.example.csv python verify_runtime.py --ocr \
+    && rm -rf /app/app/logs/* \
+    && find /app -type d -name '__pycache__' -prune -exec rm -rf '{}' +
+
+FROM base AS runtime
+
+# 最终阶段使用白名单复制运行依赖和业务文件，避免把源码仓库中的测试、环境文件和临时产物带入生产。
+COPY --from=build /usr/local /usr/local
+COPY --from=build /app/app /app/app
+COPY --from=build /app/migrations /app/migrations
+COPY --from=build /app/app.py /app/app.py
+COPY --from=build /app/celery_worker.py /app/celery_worker.py
+COPY --from=build /app/extensions.py /app/extensions.py
+COPY --from=build /app/bootstrap_schema.py /app/bootstrap_schema.py
+COPY --from=build /app/init_database.py /app/init_database.py
+COPY --from=build /app/manage_users.py /app/manage_users.py
+COPY --from=build /app/verify_runtime.py /app/verify_runtime.py
+COPY --from=build /app/docker-entrypoint.sh /app/docker-entrypoint.sh
+COPY --from=build /app/migrate_db.sh /app/migrate_db.sh
+COPY --from=build /app/start.sh /app/start.sh
+COPY --from=build /app/start_worker.sh /app/start_worker.sh
+COPY --from=build /data/paddle-cache /data/paddle-cache
+
+RUN chmod +x /app/docker-entrypoint.sh /app/migrate_db.sh /app/start.sh /app/start_worker.sh \
+    && mkdir -p /data/upload /app/app/logs /tmp/fault-analyzer-repos
 
 EXPOSE 5000
 

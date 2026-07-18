@@ -1,0 +1,141 @@
+# 生产环境只运行预构建镜像；服务器不需要源码，也不允许在此文件中声明 build。
+x-backend-environment: &backend-environment
+  PYTHONUNBUFFERED: "1"
+  FLASK_APP: app.py
+  AUTH_USERS_FILE: /data/users.csv
+  MYSQL_HOST: ${MYSQL_HOST:?请在 .env.production 配置 MYSQL_HOST}
+  MYSQL_PORT: ${MYSQL_PORT:-3306}
+  MYSQL_DATABASE: ${MYSQL_DATABASE:?请在 .env.production 配置 MYSQL_DATABASE}
+  MYSQL_USERNAME: ${MYSQL_USERNAME:?请在 .env.production 配置 MYSQL_USERNAME}
+  MYSQL_PASSWORD: ${MYSQL_PASSWORD:?请在 .env.production 配置 MYSQL_PASSWORD}
+  SQLALCHEMY_POOL_RECYCLE: ${SQLALCHEMY_POOL_RECYCLE:-1800}
+  REDIS_HOST: ${REDIS_HOST:?请在 .env.production 配置 REDIS_HOST}
+  REDIS_PORT: ${REDIS_PORT:-6379}
+  REDIS_DATABASE: ${REDIS_DATABASE:-0}
+  REDIS_USERNAME: ${REDIS_USERNAME:-}
+  REDIS_PASSWORD: ${REDIS_PASSWORD:-}
+  REDIS_SOCKET_CONNECT_TIMEOUT: ${REDIS_SOCKET_CONNECT_TIMEOUT:-10}
+  REDIS_SOCKET_TIMEOUT: ${REDIS_SOCKET_TIMEOUT:-60}
+  REDIS_HEALTH_CHECK_INTERVAL: ${REDIS_HEALTH_CHECK_INTERVAL:-30}
+  CELERY_BROKER_SOCKET_TIMEOUT: ${CELERY_BROKER_SOCKET_TIMEOUT:-360}
+  CELERY_BROKER_POOL_LIMIT: ${CELERY_BROKER_POOL_LIMIT:-10}
+  CELERY_VISIBILITY_TIMEOUT: ${CELERY_VISIBILITY_TIMEOUT:-7200}
+  STORAGE_TYPE: ${STORAGE_TYPE:-local}
+  LOCAL_STORAGE_DIR: /data/upload
+  LOG_DIR: /app/app/logs
+  LOGGING_LEVEL: ${LOGGING_LEVEL:-INFO}
+  PADDLE_PDX_CACHE_HOME: /data/paddle-cache
+  REPO_CACHE_DIR: /tmp/fault-analyzer-repos
+  AUTH_LOGIN_MAX_FAILURES: ${AUTH_LOGIN_MAX_FAILURES:-5}
+  AUTH_LOGIN_WINDOW_SECONDS: ${AUTH_LOGIN_WINDOW_SECONDS:-300}
+  ACCOUNT_REQUEST_PROVIDER: ${ACCOUNT_REQUEST_PROVIDER:-mock}
+  ACCOUNT_REQUEST_API_URL: ${ACCOUNT_REQUEST_API_URL:-}
+  ACCOUNT_REQUEST_API_TOKEN: ${ACCOUNT_REQUEST_API_TOKEN:-}
+  ACCOUNT_REQUEST_API_TIMEOUT: ${ACCOUNT_REQUEST_API_TIMEOUT:-10}
+  GIT_BASE_URL: ${GIT_BASE_URL:-}
+  GIT_USER: ${GIT_USER:-}
+  GIT_PASSWORD: ${GIT_PASSWORD:-}
+  GITLAB_PRIVATE_TOKEN: ${GITLAB_PRIVATE_TOKEN:-}
+  GITLAB_PROJECT_MEMBERSHIP_ONLY: ${GITLAB_PROJECT_MEMBERSHIP_ONLY:-false}
+  GITLAB_API_TIMEOUT: ${GITLAB_API_TIMEOUT:-30}
+  GITLAB_API_MAX_RETRIES: ${GITLAB_API_MAX_RETRIES:-3}
+  GITLAB_API_RETRY_DELAY: ${GITLAB_API_RETRY_DELAY:-1}
+  GITLAB_DB_MAX_RETRIES: ${GITLAB_DB_MAX_RETRIES:-2}
+  GITLAB_SYNC_SKIP_EXISTING_REPOS: ${GITLAB_SYNC_SKIP_EXISTING_REPOS:-true}
+  OPENAI_KEY: ${OPENAI_KEY:?请在 .env.production 配置 OPENAI_KEY}
+  OPENAI_URL: ${OPENAI_URL:?请在 .env.production 配置 OPENAI_URL}
+  OPENAI_MODEL: ${OPENAI_MODEL:-gpt-5.6-sol}
+  OPENAI_API_STYLE: ${OPENAI_API_STYLE:-chat}
+  OPENAI_REASONING_EFFORT: ${OPENAI_REASONING_EFFORT:-high}
+  LOG_ERROR_CONTEXT_LINES: ${LOG_ERROR_CONTEXT_LINES:-10}
+  LOG_CONTEXT_MAX_CHARS: ${LOG_CONTEXT_MAX_CHARS:-30000}
+  LOCAL_OCR_ENABLED: ${LOCAL_OCR_ENABLED:-true}
+  OCR_MIN_CONFIDENCE: ${OCR_MIN_CONFIDENCE:-0.45}
+
+x-backend-volumes: &backend-volumes
+  - ./users.csv:/data/users.csv:ro
+  - uploads:/data/upload
+  - runtime-logs:/app/app/logs
+  - repo-cache:/tmp/fault-analyzer-repos
+  - ocr-models:/data/paddle-cache
+
+services:
+  migrate:
+    image: ${BACKEND_IMAGE:?请在 .env.production 配置 BACKEND_IMAGE}
+    environment: *backend-environment
+    command: ["sh", "-c", "python init_database.py && flask db upgrade && python bootstrap_schema.py"]
+    volumes: *backend-volumes
+    restart: "no"
+
+  api:
+    image: ${BACKEND_IMAGE:?请在 .env.production 配置 BACKEND_IMAGE}
+    environment: *backend-environment
+    command:
+      - gunicorn
+      - -w
+      - ${WEB_CONCURRENCY:-4}
+      - -k
+      - ${GUNICORN_WORKER_CLASS:-gthread}
+      - --threads
+      - ${WEB_THREADS:-8}
+      - --timeout
+      - ${GUNICORN_TIMEOUT:-300}
+      - --bind
+      - 0.0.0.0:5000
+      - app:create_app()
+    ports:
+      - "${API_PORT:-5000}:5000"
+    volumes: *backend-volumes
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "python", "verify_runtime.py", "--runtime"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    restart: unless-stopped
+
+  worker:
+    image: ${BACKEND_IMAGE:?请在 .env.production 配置 BACKEND_IMAGE}
+    environment: *backend-environment
+    command:
+      - celery
+      - -A
+      - celery_worker.celery_app
+      - worker
+      - --loglevel=INFO
+      - --concurrency=${CELERY_WORKER_CONCURRENCY:-4}
+    volumes: *backend-volumes
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", "celery -A celery_worker.celery_app inspect ping -d celery@$$HOSTNAME --timeout 10 | grep pong"]
+      interval: 30s
+      timeout: 15s
+      retries: 5
+      start_period: 60s
+    restart: unless-stopped
+
+  frontend:
+    image: ${FRONTEND_IMAGE:?请在 .env.production 配置 FRONTEND_IMAGE}
+    ports:
+      - "${FRONTEND_PORT:-8080}:80"
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1/health | grep ok"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    restart: unless-stopped
+
+volumes:
+  ocr-models:
+  uploads:
+  runtime-logs:
+  repo-cache:

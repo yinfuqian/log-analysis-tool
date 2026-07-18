@@ -5,6 +5,7 @@
 **/.env
 **/.env.*
 !**/.env.example
+!deploy/.env.production.example
 
 # Python
 venv/
@@ -58,3 +59,7 @@ pnpm-debug.log*
 # Local source archives
 backend/Python-3.11.1.tar.gz
 backend/Python-3.11.1/
+
+# Release images and production deployment packages
+release/
+*.tar.sha256
