@@ -194,6 +194,8 @@ docker run --rm fault-analysis-frontend:test nginx -t
 - `docker-compose.yml` 用于本地开发和发布机构建，包含 `build`，源码修改后可执行 `docker compose up -d --build`。
 - `docker-compose.prod.yml` 只用于生产运行，不包含 `build`，生产服务器不需要也不应该保存源码仓库或完整源码包。镜像仍会包含程序运行所需的应用文件，因此镜像仓库权限必须严格控制；Docker 镜像本身不是加密或防反编译方案。
 
+生产 Compose 的四个服务统一使用 host 网络。API 直接监听宿主机 `5000`，前端直接监听宿主机 `8080`，因此生产文件不声明 `ports`。MySQL、Redis 必须配置为宿主机可访问的真实地址，不能使用 Compose 服务名；前端会把 `/api` 代理到宿主机 `127.0.0.1:5000`。
+
 ### 本地开发
 
 使用外部 MySQL、Redis 时：

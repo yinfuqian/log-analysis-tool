@@ -157,6 +157,9 @@ services:
         NPM_REGISTRY: ${NPM_REGISTRY:-https://registry.npmmirror.com}
         NODE_BASE_IMAGE: ${NODE_BASE_IMAGE:-docker.m.daocloud.io/library/node:20-bookworm-slim}
         NGINX_BASE_IMAGE: ${NGINX_BASE_IMAGE:-docker.m.daocloud.io/library/nginx:1.27-alpine}
+    environment:
+      FRONTEND_LISTEN_PORT: 80
+      API_UPSTREAM: http://api:5000
     ports:
       - "${FRONTEND_PORT:-8080}:80"
     depends_on:

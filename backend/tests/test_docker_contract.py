@@ -52,9 +52,11 @@ class DockerContractTests(unittest.TestCase):
     def test_frontend_nginx_defers_api_resolution_to_container_dns(self):
         """Nginx 配置检查不应依赖 Compose 网络已提前创建。"""
         source = (PROJECT_ROOT / "frontend" / "nginx.conf").read_text(encoding="utf-8")
+        local_compose = (PROJECT_ROOT / "docker-compose.yml").read_text(encoding="utf-8")
 
         self.assertIn("resolver 127.0.0.11", source)
-        self.assertIn("set $api_upstream http://api:5000", source)
+        self.assertIn("set $api_upstream ${API_UPSTREAM}", source)
+        self.assertIn("API_UPSTREAM: http://api:5000", local_compose)
         self.assertIn("rewrite ^/api/(.*)$ /$1 break", source)
         self.assertIn("proxy_pass $api_upstream", source)
 

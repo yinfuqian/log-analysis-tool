@@ -2,6 +2,10 @@
 
 生产服务器只需要本目录中的部署文件和已发布镜像，不需要项目源码，也不要执行 `docker compose up --build`。
 
+生产 Compose 统一使用 Docker host 网络：API 直接监听宿主机 `5000`，前端直接监听宿主机 `8080`。host 网络不使用 `ports` 映射；启动前请确认两个端口未被其他进程占用。
+
+MySQL 和 Redis 必须在 `.env.production` 中填写宿主机可访问的真实 IP 或域名。不要填写 `mysql`、`redis`、`api` 等 Compose 服务名，因为 host 网络不提供 Compose DNS 名称解析。前端镜像会把 `/api` 请求代理到宿主机 `127.0.0.1:5000`。
+
 ## 首次部署
 
 1. 将 `docker-compose.prod.yml`、`.env.production.example`、`users.example.csv` 和本说明放在同一目录。
@@ -16,6 +20,8 @@ docker compose --env-file .env.production -f docker-compose.prod.yml ps -a
 ```
 
 `migrate` 是一次性迁移容器，成功完成后显示为 `Exited (0)` 属于正常状态。`api`、`worker` 和 `frontend` 应保持运行。
+
+浏览器访问 `http://服务器地址:8080`，API 存活检查为 `http://服务器地址:5000/health/live`。
 
 ## 只更新后端
 

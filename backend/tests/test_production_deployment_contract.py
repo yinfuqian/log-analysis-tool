@@ -24,6 +24,37 @@ class ProductionDeploymentContractTests(unittest.TestCase):
         self.assertEqual(source.count("image: ${BACKEND_IMAGE:?"), 3)
         self.assertEqual(source.count("image: ${FRONTEND_IMAGE:?"), 1)
 
+    def test_production_services_use_host_network_without_port_mappings(self):
+        """生产服务统一使用宿主机网络，并避免声明在 host 模式下无效的端口映射。"""
+        source = (PROJECT_ROOT / "docker-compose.prod.yml").read_text(encoding="utf-8")
+
+        self.assertEqual(source.count("network_mode: host"), 4)
+        self.assertNotIn("ports:", source)
+        self.assertIn("timeout: 30s", source)
+        self.assertIn("start_period: 120s", source)
+
+    def test_frontend_image_supports_bridge_and_host_network_upstreams(self):
+        """同一个前端镜像必须能分别适配本地桥接网络和生产宿主机网络。"""
+        template = (PROJECT_ROOT / "frontend" / "nginx.conf").read_text(encoding="utf-8")
+        dockerfile = (PROJECT_ROOT / "frontend" / "Dockerfile").read_text(encoding="utf-8")
+        local_compose = (PROJECT_ROOT / "docker-compose.yml").read_text(encoding="utf-8")
+        prod_compose = (PROJECT_ROOT / "docker-compose.prod.yml").read_text(encoding="utf-8")
+
+        self.assertIn("${FRONTEND_LISTEN_PORT}", template)
+        self.assertIn("${API_UPSTREAM}", template)
+        self.assertIn("/etc/nginx/templates/default.conf.template", dockerfile)
+        self.assertIn("API_UPSTREAM: http://api:5000", local_compose)
+        self.assertIn("FRONTEND_LISTEN_PORT: 80", local_compose)
+        self.assertIn("API_UPSTREAM: http://127.0.0.1:5000", prod_compose)
+        self.assertIn("FRONTEND_LISTEN_PORT: 8080", prod_compose)
+
+    def test_frontend_dockerfile_uses_valid_shell_healthcheck_syntax(self):
+        """Dockerfile 健康检查必须使用 Docker 支持的 CMD Shell 形式并展开监听端口。"""
+        dockerfile = (PROJECT_ROOT / "frontend" / "Dockerfile").read_text(encoding="utf-8")
+
+        self.assertNotIn("CMD-SHELL", dockerfile)
+        self.assertIn('CMD wget -qO- "http://127.0.0.1:${FRONTEND_LISTEN_PORT}/health"', dockerfile)
+
     def test_backend_runtime_stage_copies_only_runtime_files(self):
         """后端最终阶段必须使用白名单复制并要求外部用户表。"""
         dockerfile = (PROJECT_ROOT / "backend" / "Dockerfile").read_text(encoding="utf-8")

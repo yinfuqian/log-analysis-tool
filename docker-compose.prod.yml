@@ -62,6 +62,7 @@ x-backend-volumes: &backend-volumes
 services:
   migrate:
     image: ${BACKEND_IMAGE:?请在 .env.production 配置 BACKEND_IMAGE}
+    network_mode: host
     environment: *backend-environment
     command: ["sh", "-c", "python init_database.py && flask db upgrade && python bootstrap_schema.py"]
     volumes: *backend-volumes
@@ -69,6 +70,7 @@ services:
 
   api:
     image: ${BACKEND_IMAGE:?请在 .env.production 配置 BACKEND_IMAGE}
+    network_mode: host
     environment: *backend-environment
     command:
       - gunicorn
@@ -83,8 +85,6 @@ services:
       - --bind
       - 0.0.0.0:5000
       - app:create_app()
-    ports:
-      - "${API_PORT:-5000}:5000"
     volumes: *backend-volumes
     depends_on:
       migrate:
@@ -92,13 +92,14 @@ services:
     healthcheck:
       test: ["CMD", "python", "verify_runtime.py", "--runtime"]
       interval: 30s
-      timeout: 10s
+      timeout: 30s
       retries: 5
-      start_period: 60s
+      start_period: 120s
     restart: unless-stopped
 
   worker:
     image: ${BACKEND_IMAGE:?请在 .env.production 配置 BACKEND_IMAGE}
+    network_mode: host
     environment: *backend-environment
     command:
       - celery
@@ -121,13 +122,15 @@ services:
 
   frontend:
     image: ${FRONTEND_IMAGE:?请在 .env.production 配置 FRONTEND_IMAGE}
-    ports:
-      - "${FRONTEND_PORT:-8080}:80"
+    network_mode: host
+    environment:
+      FRONTEND_LISTEN_PORT: 8080
+      API_UPSTREAM: http://127.0.0.1:5000
     depends_on:
       api:
         condition: service_healthy
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1/health | grep ok"]
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:$$FRONTEND_LISTEN_PORT/health | grep ok"]
       interval: 30s
       timeout: 5s
       retries: 5

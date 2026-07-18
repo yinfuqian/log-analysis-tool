@@ -20,10 +20,14 @@ RUN npm run test:unit -- --runInBand \
 # 生产阶段仅保留 Nginx 和静态文件，减少攻击面和镜像体积。
 FROM ${NGINX_BASE_IMAGE}
 
-COPY nginx.conf /etc/nginx/conf.d/default.conf
+ENV FRONTEND_LISTEN_PORT=80 \
+    API_UPSTREAM=http://api:5000
+
+# 官方 Nginx entrypoint 会在启动时渲染模板，使同一镜像同时兼容桥接网络和 host 网络。
+COPY nginx.conf /etc/nginx/templates/default.conf.template
 COPY --from=build /workspace/dist /usr/share/nginx/html
 
 EXPOSE 80
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-  CMD wget -qO- http://127.0.0.1/health || exit 1
+  CMD wget -qO- "http://127.0.0.1:${FRONTEND_LISTEN_PORT}/health" || exit 1
