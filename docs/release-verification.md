@@ -30,7 +30,7 @@
 ## Docker 镜像与运行状态
 
 - 后端镜像：`fault-analysis-backend:final`
-- 后端镜像 ID：`sha256:5d87f7d94460262828aaea54932f201c7557fab2942d64f3388a7dc95bec850c`
+- 后端镜像 ID：`sha256:f24a094994f534b46a955f95d43ff08c900de024148eadf61b5e7b6c44303839`
 - 前端镜像：`fault-analysis-frontend:final`
 - 前端镜像 ID：`sha256:247fd674c70338efda43d7c8a9944a548e0218206af439b3157807ecba3d4d13`
 - MySQL：健康
@@ -39,6 +39,7 @@
 - Worker：健康，Celery `inspect ping` 返回 `pong`
 - 前端：健康，`/health` 返回 HTTP 200 和 `ok`
 - 数据库迁移容器：退出码 0
+- Windows CRLF 构建上下文验证：镜像默认 ENTRYPOINT 输出 `ENTRYPOINT_OK`，`docker-entrypoint.sh` 的 CRLF 数量为 0
 
 运行时自检确认数据库、Redis、用户 CSV 和运行目录全部可用。PaddleOCR 三个模型从 `/data/paddle-cache` 加载，真实初始化和预测成功，OCR 自检退出码为 0。
 

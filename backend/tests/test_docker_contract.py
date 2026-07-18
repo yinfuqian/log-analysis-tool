@@ -64,6 +64,14 @@ class DockerContractTests(unittest.TestCase):
 
         self.assertIn("PyMySQL[rsa]==1.1.1", requirements)
 
+    def test_backend_shell_scripts_are_normalized_for_linux(self):
+        """仓库和镜像构建都必须阻止 Windows CRLF 破坏 Linux 入口脚本。"""
+        dockerfile = (PROJECT_ROOT / "backend" / "Dockerfile").read_text(encoding="utf-8")
+        attributes = (PROJECT_ROOT / ".gitattributes").read_text(encoding="utf-8")
+
+        self.assertIn("*.sh text eol=lf", attributes)
+        self.assertIn("find /app -type f -name '*.sh' -exec sed -i 's/\\r$//' {} +", dockerfile)
+
 
 if __name__ == "__main__":
     unittest.main()

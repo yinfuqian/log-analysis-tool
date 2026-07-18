@@ -32,8 +32,10 @@ RUN python -m pip install --upgrade pip \
 
 COPY . .
 
-# 构建期执行完整自检。OCR 模型会下载到镜像目录，并在首次挂载命名卷时自动初始化到卷中。
-RUN chmod +x /app/docker-entrypoint.sh /app/migrate_db.sh /app/start.sh /app/start_worker.sh \
+# Windows 构建上下文可能把 Shell 脚本转换为 CRLF；先统一恢复为 Linux LF，再设置执行权限。
+# 构建期随后执行完整自检。OCR 模型会下载到镜像目录，并在首次挂载命名卷时自动初始化到卷中。
+RUN find /app -type f -name '*.sh' -exec sed -i 's/\r$//' {} + \
+    && chmod +x /app/docker-entrypoint.sh /app/migrate_db.sh /app/start.sh /app/start_worker.sh \
     && mkdir -p /data/upload /data/paddle-cache /app/app/logs /tmp/fault-analyzer-repos \
     && python -m pip check \
     && python -m compileall -q app.py celery_worker.py app bootstrap_schema.py init_database.py verify_runtime.py \
