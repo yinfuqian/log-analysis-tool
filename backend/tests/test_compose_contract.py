@@ -48,6 +48,17 @@ class ComposeContractTests(unittest.TestCase):
         self.assertIn("BACKEND_IMAGE=fault-analysis-backend:latest", source)
         self.assertIn("FRONTEND_IMAGE=fault-analysis-frontend:latest", source)
 
+    def test_local_database_and_redis_require_explicit_profile(self):
+        """外部依赖模式不应默认创建本地 MySQL 和 Redis 容器。"""
+        source = COMPOSE_PATH.read_text(encoding="utf-8")
+        migrate_source = source.split("  migrate:", 1)[1].split("  api:", 1)[0]
+        readme = (PROJECT_ROOT / "README.md").read_text(encoding="utf-8")
+
+        self.assertEqual(source.count('profiles: ["local-deps"]'), 2)
+        self.assertEqual(migrate_source.count("required: false"), 2)
+        self.assertIn("docker compose --profile local-deps up -d --build", readme)
+        self.assertIn("docker compose up -d --build", readme)
+
 
 if __name__ == "__main__":
     unittest.main()

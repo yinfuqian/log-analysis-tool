@@ -12,7 +12,7 @@
 - 用户由管理员维护 `users.csv`，应用热加载新增、禁用和立即下线状态。
 - 除登录和账号申请外，服务接口必须携带有效登录令牌。
 - 用户操作写入数据库审计表，便于按操作人和请求编号追踪。
-- Docker Compose 提供 MySQL、Redis、数据库迁移、API、Worker、前端和 OCR 完整运行环境。
+- Docker Compose 提供数据库迁移、API、Worker、前端和 OCR 运行环境，并可通过 `local-deps` Profile 启动本地 MySQL、Redis。
 
 ## 服务架构
 
@@ -29,11 +29,20 @@
 
 环境要求：Docker Desktop 或 Docker Engine，且支持 Docker Compose v2。
 
+使用本地 MySQL、Redis 的完整开发环境：
+
 ```powershell
 Copy-Item .env.example .env
-docker compose build
-docker compose up -d
-docker compose ps
+docker compose --profile local-deps up -d --build
+docker compose ps -a
+```
+
+使用外部 MySQL、Redis 时，先填写 `.env` 中的 `COMPOSE_MYSQL_HOST` 和 `COMPOSE_REDIS_HOST`，然后直接启动；此模式不会创建本地数据库容器：
+
+```powershell
+docker compose --profile local-deps down
+docker compose up -d --build
+docker compose ps -a
 ```
 
 首次生产启动前至少修改 `.env` 中的以下内容：
@@ -124,7 +133,7 @@ docker compose exec api python verify_runtime.py --ocr
 
 ## 数据库迁移
 
-Compose 会先等待 MySQL 和 Redis 健康，再运行：
+启用 `local-deps` Profile 时，Compose 会先等待本地 MySQL 和 Redis 健康；使用外部依赖时，迁移容器直接连接 `.env` 指定的地址并运行：
 
 ```powershell
 python init_database.py
@@ -177,13 +186,25 @@ GIT_PASSWORD=
 GITLAB_PRIVATE_TOKEN=
 ```
 
-Compose 默认连接容器内的 `mysql` 和 `redis`。使用外部服务时配置：
+Compose 默认不启动本地 MySQL 和 Redis。使用外部服务时配置：
 
 ```env
 COMPOSE_MYSQL_HOST=数据库地址
 COMPOSE_MYSQL_PORT=3306
 COMPOSE_REDIS_HOST=Redis地址
 COMPOSE_REDIS_PORT=6379
+```
+
+外部依赖模式直接执行：
+
+```powershell
+docker compose up -d --build
+```
+
+只有需要本地依赖时才执行：
+
+```powershell
+docker compose --profile local-deps up -d --build
 ```
 
 ## Windows 客户端

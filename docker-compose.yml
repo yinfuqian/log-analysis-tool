@@ -33,6 +33,7 @@ x-backend-volumes: &backend-volumes
 
 services:
   mysql:
+    profiles: ["local-deps"]
     image: ${MYSQL_IMAGE:-docker.m.daocloud.io/library/mysql:8.4}
     environment:
       MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-root-change-me}
@@ -55,6 +56,7 @@ services:
     restart: unless-stopped
 
   redis:
+    profiles: ["local-deps"]
     image: ${REDIS_IMAGE:-docker.m.daocloud.io/library/redis:7.4-alpine}
     environment:
       REDIS_PASSWORD: ${REDIS_PASSWORD:-change-me}
@@ -82,8 +84,10 @@ services:
     depends_on:
       mysql:
         condition: service_healthy
+        required: false
       redis:
         condition: service_healthy
+        required: false
     restart: "no"
 
   api:
