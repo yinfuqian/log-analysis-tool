@@ -51,7 +51,7 @@ windows-client\dist\FaultAnalyzerClient.exe
 
 ## macOS 打包
 
-macOS 应用必须在目标 Mac 架构上构建：
+macOS 应用必须在 Mac 上构建。脚本默认生成同时支持 Intel 和 Apple Silicon 的 Universal 2 应用；如果没有符合要求的 Python，会从 python.org 自动下载并安装官方 Universal 2 Python，安装系统 Python 时需要输入管理员密码。
 
 ```bash
 cd windows-client
@@ -59,12 +59,28 @@ chmod +x build-macos.sh
 ./build-macos.sh
 ```
 
+也可以只构建单一架构：
+
+```bash
+./build-macos.sh arm64
+./build-macos.sh x86_64
+```
+
+打包远程环境客户端时先配置后端地址：
+
+```bash
+export WINDOWS_CLIENT_BACKEND_URL=https://example.com/logapi
+./build-macos.sh
+```
+
 产物：
 
 ```text
 windows-client/dist/FaultAnalyzerClient.app
-windows-client/dist/FaultAnalyzerClient-macos.zip
+windows-client/dist/FaultAnalyzerClient-macos-universal2.zip
 ```
+
+详细的 Python 版本、签名和架构验证说明见 `MACOS_BUILD.md`。
 
 ## 图片分析说明
 
