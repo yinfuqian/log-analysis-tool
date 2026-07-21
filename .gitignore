@@ -63,3 +63,6 @@ backend/Python-3.11.1/
 # Release images and production deployment packages
 release/
 *.tar.sha256
+
+# Codex isolated implementation worktrees
+.worktreess/
