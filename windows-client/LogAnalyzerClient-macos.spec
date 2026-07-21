@@ -1,8 +1,11 @@
 ﻿# -*- mode: python ; coding: utf-8 -*-
 
+import os
+
 from client_build_info import APP_VERSION
 
 bundle_version = APP_VERSION.lstrip("v")
+target_arch = os.getenv("MACOS_TARGET_ARCH", "universal2")
 
 
 a = Analysis(
@@ -33,7 +36,7 @@ exe = EXE(
     console=False,
     disable_windowed_traceback=False,
     argv_emulation=False,
-    target_arch=None,
+    target_arch=target_arch,
     codesign_identity=None,
     entitlements_file=None,
 )
