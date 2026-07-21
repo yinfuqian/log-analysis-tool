@@ -66,11 +66,10 @@ chmod +x build-macos.sh
 ./build-macos.sh x86_64
 ```
 
-打包远程环境客户端时先配置后端地址：
+macOS 客户端后端地址已固定在脚本内，无需手动执行 `export`：
 
-```bash
-export WINDOWS_CLIENT_BACKEND_URL=https://example.com/logapi
-./build-macos.sh
+```text
+http://qwbot30.wezhuiyi.com:9595/zhuiyi/logapi
 ```
 
 产物：

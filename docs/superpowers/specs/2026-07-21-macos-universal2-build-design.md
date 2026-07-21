@@ -55,7 +55,7 @@ Universal 2 构建必须使用本身包含 `arm64` 和 `x86_64` 架构的 Python
 3. 更新 `pip`、`setuptools` 和 `wheel`。
 4. 自动安装客户端依赖与 PyInstaller，缺失依赖不要求用户手动处理。
 5. 备份 `client_build_info.py`。
-6. 执行 `update_build_info.py`，把版本、构建日期和 `WINDOWS_CLIENT_BACKEND_URL` 写入应用。
+6. 在脚本内设置固定的生产后端地址，并执行 `update_build_info.py`，把版本、构建日期和后端地址写入应用。
 7. 清理旧的 PyInstaller 临时目录和同名产物。
 8. 按目标架构运行 PyInstaller。
 9. 验证 `.app` 主程序的 Mach-O 架构。
@@ -113,6 +113,8 @@ macOS 不加载 Windows 专用的 `windnd`。
 - 存在签名和 ZIP 打包步骤。
 
 同步更新 `windows-client/README.md` 和 `windows-client/MACOS_BUILD.md`，说明 Universal 2 Python、执行命令、后端地址配置、签名方式和最终产物。
+
+macOS 客户端生产地址固定为 `http://qwbot30.wezhuiyi.com:9595/zhuiyi/logapi`，打包人员不需要手动设置环境变量。仓库通过 `.gitattributes` 强制所有 `.sh` 使用 LF 行尾，并通过合同测试防止 `bash\r` 启动错误回归。
 
 ## 范围边界
 

@@ -10,8 +10,16 @@ class MacOSBuildContractTests(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.script = (CLIENT_DIR / "build-macos.sh").read_text(encoding="utf-8")
+        cls.script_path = CLIENT_DIR / "build-macos.sh"
+        cls.script_bytes = cls.script_path.read_bytes()
+        cls.script = cls.script_bytes.decode("utf-8")
         cls.spec = (CLIENT_DIR / "LogAnalyzerClient-macos.spec").read_text(encoding="utf-8")
+        cls.attributes = (CLIENT_DIR.parent / ".gitattributes").read_text(encoding="utf-8")
+
+    def test_shell_script_is_stored_with_lf_line_endings(self):
+        self.assertNotIn(b"\r\n", self.script_bytes)
+        self.assertTrue(self.script_bytes.startswith(b"#!/usr/bin/env bash\n"))
+        self.assertIn("*.sh text eol=lf", self.attributes)
 
     def test_universal2_is_default_and_single_architectures_are_supported(self):
         self.assertIn('TARGET_ARCH="${1:-universal2}"', self.script)
@@ -25,6 +33,13 @@ class MacOSBuildContractTests(unittest.TestCase):
     def test_dependencies_and_pyinstaller_are_installed_automatically(self):
         self.assertIn("pip install -r requirements.txt", self.script)
         self.assertIn('pip install "pyinstaller', self.script)
+
+    def test_production_backend_url_is_built_in(self):
+        self.assertIn(
+            'WINDOWS_CLIENT_BACKEND_URL="http://qwbot30.wezhuiyi.com:9595/zhuiyi/logapi"',
+            self.script,
+        )
+        self.assertIn("export WINDOWS_CLIENT_BACKEND_URL", self.script)
 
     def test_build_info_is_restored_on_every_exit(self):
         self.assertIn("trap cleanup EXIT", self.script)

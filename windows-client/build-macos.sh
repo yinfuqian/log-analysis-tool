@@ -7,6 +7,9 @@ cd "$(dirname "$0")"
 TARGET_ARCH="${1:-universal2}"
 MACOS_PYTHON_VERSION="${MACOS_PYTHON_VERSION:-3.11.9}"
 MACOS_CODESIGN_IDENTITY="${MACOS_CODESIGN_IDENTITY:--}"
+# macOS 客户端固定连接生产故障分析服务，打包时不需要手动 export。
+WINDOWS_CLIENT_BACKEND_URL="http://qwbot30.wezhuiyi.com:9595/zhuiyi/logapi"
+export WINDOWS_CLIENT_BACKEND_URL
 PYTHON_MINOR_VERSION="${MACOS_PYTHON_VERSION%.*}"
 VENV_DIR="${VENV_DIR:-.venv-macos-${TARGET_ARCH}}"
 TEMP_DIR=""

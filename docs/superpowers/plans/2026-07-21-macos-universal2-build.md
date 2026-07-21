@@ -172,7 +172,7 @@ git commit -m "feat: build universal macos client"
 
 - [ ] **Step 1: Update macOS build instructions**
 
-Document the default Universal 2 command, optional `arm64` and `x86_64` commands, `MACOS_PYTHON_VERSION`, `WINDOWS_CLIENT_BACKEND_URL`, `MACOS_CODESIGN_IDENTITY`, administrator-password requirement, output paths, and the limitation that real Mach-O verification must run on macOS.
+Document the default Universal 2 command, optional `arm64` and `x86_64` commands, `MACOS_PYTHON_VERSION`, the built-in production backend address, `MACOS_CODESIGN_IDENTITY`, administrator-password requirement, LF line-ending requirement, output paths, and the limitation that real Mach-O verification must run on macOS.
 
 - [ ] **Step 2: Run client tests**
 

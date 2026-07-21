@@ -10,6 +10,8 @@ chmod +x build-macos.sh
 ./build-macos.sh
 ```
 
+脚本必须保持 Unix LF 行尾。如果出现 `env: bash\r: No such file or directory`，说明使用的是经过 Windows CRLF 转换的旧文件，请重新获取仓库中的最新版 `build-macos.sh`，不要继续使用旧副本。
+
 脚本会自动完成：
 
 1. 检查 macOS 构建工具。
@@ -85,20 +87,15 @@ xcode-select --install
 
 等待 macOS 完成安装后重新执行打包脚本。
 
-## 配置后端地址
+## 后端地址
 
-构建远程环境客户端前设置：
-
-```bash
-export WINDOWS_CLIENT_BACKEND_URL=https://example.com/logapi
-./build-macos.sh
-```
-
-该地址会写入客户端构建信息并随应用发布。没有配置时使用：
+macOS 客户端生产后端地址固定在 `build-macos.sh` 中，运行脚本时不需要手动 `export`：
 
 ```text
-http://127.0.0.1:5000
+http://qwbot30.wezhuiyi.com:9595/zhuiyi/logapi
 ```
+
+构建脚本会把该地址写入客户端构建信息并随应用发布。
 
 ## Python 包镜像
 
