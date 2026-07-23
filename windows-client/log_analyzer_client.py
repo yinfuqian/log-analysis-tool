@@ -3252,7 +3252,8 @@ class LogAnalyzerWindow:
         self.root = root
         self.api_client = api_client
         self.root.title(APP_RELEASE_LABEL)
-        self.root.geometry("1020x780")
+        self.root.geometry("1280x860")
+        self.root.minsize(1100, 760)
         self.root.deiconify()
         self.upload_result = None
         self.repo_path = None
@@ -3308,30 +3309,32 @@ class LogAnalyzerWindow:
         progress_frame = ttk.Frame(container, padding=(0, 0, 0, 8))
         progress_frame.pack(fill=tk.X)
         ttk.Progressbar(progress_frame, variable=self.progress_percent, maximum=100, mode="determinate").pack(side=tk.LEFT, fill=tk.X, expand=True)
-        ttk.Label(progress_frame, textvariable=self.progress_text, width=48).pack(side=tk.LEFT, padx=8)
+        self.progress_label = ttk.Label(progress_frame, textvariable=self.progress_text, justify=tk.LEFT, wraplength=520)
+        self.progress_label.pack(side=tk.LEFT, padx=8)
 
         form = ttk.LabelFrame(container, text="\u5206\u6790\u914d\u7f6e", padding=12)
         form.pack(fill=tk.X)
         for column in range(5):
             form.columnconfigure(column, weight=0)
+        form.columnconfigure(1, weight=1)
 
-        self.backend_entry = self._add_entry(form, "\u540e\u7aef\u5730\u5740", self.backend_url, 0, 0, width=58)
+        self.backend_entry = self._add_entry(form, "\u540e\u7aef\u5730\u5740", self.backend_url, 0, 0, width=42)
         self.sync_git_button = ttk.Button(form, text="\u540c\u6b65 Git \u9879\u76ee", command=self.sync_git_projects_async)
         self.sync_git_button.grid(row=0, column=2, padx=8, pady=6, sticky=tk.W)
 
         ttk.Label(form, text="\u4ea7\u54c1").grid(row=1, column=0, sticky=tk.W, pady=6)
-        self.product_combo = ttk.Combobox(form, textvariable=self.product_selection, state="normal", width=58)
-        self.product_combo.grid(row=1, column=1, columnspan=3, sticky=tk.W, pady=6)
+        self.product_combo = ttk.Combobox(form, textvariable=self.product_selection, state="normal", width=42)
+        self.product_combo.grid(row=1, column=1, columnspan=3, sticky=tk.EW, pady=6)
         self._bind_searchable_combobox(self.product_combo, self.on_product_selected)
 
         ttk.Label(form, text="\u6a21\u5757").grid(row=2, column=0, sticky=tk.W, pady=6)
-        self.module_combo = ttk.Combobox(form, textvariable=self.module_selection, state="normal", width=58)
-        self.module_combo.grid(row=2, column=1, columnspan=3, sticky=tk.W, pady=6)
+        self.module_combo = ttk.Combobox(form, textvariable=self.module_selection, state="normal", width=42)
+        self.module_combo.grid(row=2, column=1, columnspan=3, sticky=tk.EW, pady=6)
         self._bind_searchable_combobox(self.module_combo, self.on_module_selected)
 
         ttk.Label(form, text="\u5206\u652f\u5730\u5740").grid(row=3, column=0, sticky=tk.W, pady=6)
-        self.branch_combo = ttk.Combobox(form, textvariable=self.branch_address, state="normal", width=82)
-        self.branch_combo.grid(row=3, column=1, columnspan=3, sticky=tk.W, pady=6)
+        self.branch_combo = ttk.Combobox(form, textvariable=self.branch_address, state="normal", width=56)
+        self.branch_combo.grid(row=3, column=1, columnspan=3, sticky=tk.EW, pady=6)
         self._bind_searchable_combobox(self.branch_combo, self.on_branch_selected)
 
         ttk.Label(form, text="\u7248\u672c/Tag").grid(row=4, column=0, sticky=tk.W, pady=6)
@@ -3355,8 +3358,8 @@ class LogAnalyzerWindow:
 
         self.path_label = ttk.Label(form, textvariable=self.path_label_var)
         self.path_label.grid(row=7, column=0, sticky=tk.W, pady=6)
-        self.log_file_entry = ttk.Entry(form, textvariable=self.file_path, width=82)
-        self.log_file_entry.grid(row=7, column=1, sticky=tk.W, pady=6)
+        self.log_file_entry = ttk.Entry(form, textvariable=self.file_path, width=48)
+        self.log_file_entry.grid(row=7, column=1, sticky=tk.EW, pady=6)
         self.choose_file_button = ttk.Button(form, textvariable=self.choose_button_text, command=self.choose_file)
         self.choose_file_button.grid(row=7, column=2, padx=8, pady=6, sticky=tk.W)
         self.paste_image_button = ttk.Button(form, text="\u7c98\u8d34\u56fe\u7247", command=self.paste_image)
@@ -3369,24 +3372,32 @@ class LogAnalyzerWindow:
             text="图片类型（日志截图请选择 log_image；业务页面请选择 business_image）",
         )
         self.image_tag_label.grid(row=8, column=0, sticky=tk.W, pady=6)
+        self.image_tag_label.configure(text="\u56fe\u7247\u7c7b\u578b")
         self.image_tag_combo = ttk.Combobox(form, textvariable=self.image_tag, values=("log_image", "business_image"), state="readonly", width=24)
         self.image_tag_combo.grid(row=8, column=1, sticky=tk.W, pady=6)
+        self.image_tag_help = ttk.Label(
+            form,
+            text="\u65e5\u5fd7\u622a\u56fe\u8bf7\u9009\u62e9 log_image\uff1b\u4e1a\u52a1\u9875\u9762\u8bf7\u9009\u62e9 business_image",
+            justify=tk.LEFT,
+            wraplength=820,
+        )
+        self.image_tag_help.grid(row=9, column=1, columnspan=4, sticky=tk.EW, pady=(0, 4))
 
         self.image_description_label = ttk.Label(form, text="\u56fe\u7247\u63cf\u8ff0")
-        self.image_description_label.grid(row=9, column=0, sticky=tk.NW, pady=6)
-        self.image_description_text = tk.Text(form, width=62, height=4, font=("Microsoft YaHei UI", 10))
-        self.image_description_text.grid(row=9, column=1, columnspan=3, sticky=tk.W, pady=6)
+        self.image_description_label.grid(row=10, column=0, sticky=tk.NW, pady=6)
+        self.image_description_text = tk.Text(form, width=48, height=4, font=("Microsoft YaHei UI", 10))
+        self.image_description_text.grid(row=10, column=1, columnspan=4, sticky=tk.EW, pady=6)
 
         drop_hint_text = (
             "\u652f\u6301\u76f4\u63a5\u62d6\u62fd\u56fe\u7247\u5230\u8fd9\u91cc\uff0c\u4e5f\u53ef\u4ee5\u4f7f\u7528\u7c98\u8d34\u56fe\u7247/\u9009\u62e9\u6587\u4ef6"
             if DRAG_DROP_ENABLED
             else "\u5f53\u524d\u6253\u5305\u73af\u5883\u672a\u542f\u7528\u62d6\u62fd\uff0c\u8bf7\u4f7f\u7528\u7c98\u8d34\u56fe\u7247\u6216\u9009\u62e9\u6587\u4ef6"
         )
-        self.drop_hint = ttk.Label(form, text=drop_hint_text, relief=tk.GROOVE, padding=10, width=56)
-        self.drop_hint.grid(row=10, column=1, columnspan=3, sticky=tk.W, pady=(0, 6))
+        self.drop_hint = ttk.Label(form, text=drop_hint_text, relief=tk.GROOVE, padding=10, justify=tk.LEFT, wraplength=820)
+        self.drop_hint.grid(row=11, column=1, columnspan=4, sticky=tk.EW, pady=(0, 6))
 
         self.image_list_frame = ttk.LabelFrame(form, text="\u5df2\u6682\u5b58\u56fe\u7247", padding=6)
-        self.image_list_frame.grid(row=11, column=1, columnspan=4, sticky=tk.W, pady=(0, 6))
+        self.image_list_frame.grid(row=12, column=1, columnspan=4, sticky=tk.EW, pady=(0, 6))
         self.image_list_rows = ttk.Frame(self.image_list_frame)
         self.image_list_rows.pack(fill=tk.X)
         self.image_list_empty_label = ttk.Label(self.image_list_rows, text="\u8fd8\u6ca1\u6709\u6682\u5b58\u56fe\u7247\uff0c\u53ef\u9009\u62e9\u3001\u7c98\u8d34\u6216\u62d6\u62fd\u591a\u5f20\u56fe\u7247")
@@ -3398,7 +3409,8 @@ class LogAnalyzerWindow:
         self.upload_button.pack(side=tk.LEFT)
         self.analyze_button = ttk.Button(actions, text="\u5f00\u59cb\u5206\u6790", command=self.analyze_or_cancel)
         self.analyze_button.pack(side=tk.LEFT, padx=8)
-        ttk.Label(actions, textvariable=self.status).pack(side=tk.LEFT, padx=16)
+        self.status_label = ttk.Label(form, textvariable=self.status, justify=tk.LEFT, wraplength=960)
+        self.status_label.grid(row=13, column=1, columnspan=4, sticky=tk.EW, pady=(0, 4))
 
         result_frame = ttk.LabelFrame(container, text="\u6267\u884c\u7ed3\u679c", padding=8)
         result_frame.pack(fill=tk.BOTH, expand=True)
@@ -3420,7 +3432,7 @@ class LogAnalyzerWindow:
         """处理 _add_entry 对应的业务步骤，并向调用方返回所需结果。"""
         ttk.Label(parent, text=label).grid(row=row, column=column, sticky=tk.W, pady=6)
         entry = ttk.Entry(parent, textvariable=variable, width=width)
-        entry.grid(row=row, column=column + 1, columnspan=columnspan, sticky=tk.W, pady=6)
+        entry.grid(row=row, column=column + 1, columnspan=columnspan, sticky=tk.EW, pady=6)
         return entry
 
     def _bind_searchable_combobox(self, combobox, selected_callback=None):
@@ -3476,6 +3488,7 @@ class LogAnalyzerWindow:
         if is_image_mode:
             self.image_tag_label.grid()
             self.image_tag_combo.grid()
+            self.image_tag_help.grid()
             self.image_description_label.grid()
             self.image_description_text.grid()
             self.drop_hint.grid()
@@ -3485,6 +3498,7 @@ class LogAnalyzerWindow:
         else:
             self.image_tag_label.grid_remove()
             self.image_tag_combo.grid_remove()
+            self.image_tag_help.grid_remove()
             self.image_description_label.grid_remove()
             self.image_description_text.grid_remove()
             self.drop_hint.grid_remove()
