@@ -25,8 +25,8 @@ x-backend-environment: &backend-environment
   REPO_CACHE_DIR: /tmp/fault-analyzer-repos
 
 x-backend-volumes: &backend-volumes
-  - ./users.csv:/data/users.csv:ro
   - uploads:/data/upload
+  - ./config:/data/
   - runtime-logs:/app/app/logs
   - repo-cache:/tmp/fault-analyzer-repos
   - ocr-models:/data/paddle-cache

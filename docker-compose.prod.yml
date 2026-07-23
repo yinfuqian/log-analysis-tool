@@ -53,8 +53,8 @@ x-backend-environment: &backend-environment
   OCR_MIN_CONFIDENCE: ${OCR_MIN_CONFIDENCE:-0.45}
 
 x-backend-volumes: &backend-volumes
-  - ./users.csv:/data/users.csv:ro
   - uploads:/data/upload
+  - ./config:/data/
   - runtime-logs:/app/app/logs
   - repo-cache:/tmp/fault-analyzer-repos
   - ocr-models:/data/paddle-cache
