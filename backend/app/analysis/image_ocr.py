@@ -1,9 +1,12 @@
 """image ocr 模块负责本文件相关的业务流程、数据转换与依赖协作。"""
+import hashlib
+import json
 import logging
 import os
 import sys
 import threading
 import tempfile
+from pathlib import Path
 
 
 _ENGINE = None
@@ -151,12 +154,114 @@ def _predict(engine, image):
     raise TypeError("OCR engine does not provide predict() or ocr()")
 
 
+def _same_prediction_input(left, right):
+    if left is right:
+        return True
+    if isinstance(left, (str, bytes, os.PathLike)) and isinstance(right, (str, bytes, os.PathLike)):
+        return os.fspath(left) == os.fspath(right)
+    return False
+
+
+def _default_cache_dir():
+    configured = os.getenv("OCR_RESULT_CACHE_DIR")
+    if configured:
+        return configured
+    local_storage_dir = os.getenv("LOCAL_STORAGE_DIR", "/data/upload")
+    return os.path.join(local_storage_dir, ".ocr-cache")
+
+
+def _file_content_hash(image_path):
+    hasher = hashlib.sha256()
+    with open(image_path, "rb") as file_obj:
+        for chunk in iter(lambda: file_obj.read(1024 * 1024), b""):
+            hasher.update(chunk)
+    return hasher.hexdigest()
+
+
+def _callable_signature(callable_obj):
+    if callable_obj is None:
+        return ""
+    parts = [
+        str(getattr(callable_obj, "__module__", "")),
+        str(getattr(callable_obj, "__qualname__", getattr(callable_obj, "__name__", ""))),
+        str(getattr(callable_obj, "__name__", "")),
+    ]
+    code = getattr(callable_obj, "__code__", None)
+    if code is not None:
+        parts.extend([
+            code.co_code.hex(),
+            repr(code.co_consts),
+            repr(code.co_names),
+            repr(code.co_varnames),
+        ])
+    parts.append(repr(getattr(callable_obj, "__defaults__", None)))
+    parts.append(repr(getattr(callable_obj, "__kwdefaults__", None)))
+    closure = getattr(callable_obj, "__closure__", None)
+    if closure:
+        parts.append(repr([cell.cell_contents for cell in closure]))
+    return hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()
+
+
+def _cache_signature(image_path, preprocess, min_confidence):
+    raw_signature = "|".join([
+        _file_content_hash(image_path),
+        f"{float(min_confidence):.6f}",
+        _callable_signature(preprocess),
+    ])
+    return hashlib.sha256(raw_signature.encode("utf-8")).hexdigest()
+
+
+def _read_cached_result(cache_dir, cache_key):
+    if not cache_dir:
+        return None
+    cache_path = Path(cache_dir) / f"{cache_key}.json"
+    if not cache_path.exists():
+        return None
+    try:
+        payload = json.loads(cache_path.read_text(encoding="utf-8"))
+    except Exception:
+        logging.debug("OCR cache read failed: %s", cache_path, exc_info=True)
+        return None
+    if not isinstance(payload, dict):
+        return None
+    return payload
+
+
+def _write_cached_result(cache_dir, cache_key, payload):
+    if not cache_dir:
+        return
+    try:
+        cache_root = Path(cache_dir)
+        cache_root.mkdir(parents=True, exist_ok=True)
+        cache_path = cache_root / f"{cache_key}.json"
+        temp_path = cache_root / f"{cache_key}.json.tmp"
+        temp_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        os.replace(temp_path, cache_path)
+    except Exception:
+        logging.debug("OCR cache write failed: %s", cache_key, exc_info=True)
+
+
+def _predict_with_fallback(engine, image_path, preprocess, warnings):
+    preprocessed = preprocess(image_path)
+    try:
+        return _predict(engine, preprocessed)
+    except Exception as exc:
+        if _same_prediction_input(preprocessed, image_path):
+            raise
+        warnings.append(
+            f"preprocessed OCR failed for {os.path.basename(image_path)}, retried original image: {exc}"
+        )
+        logging.warning("Preprocessed OCR failed, retrying original image: %s: %s", image_path, exc)
+        return _predict(engine, image_path)
+
+
 def extract_text_from_images(
     image_paths,
     engine=None,
     engine_factory=None,
     min_confidence=0.45,
     image_preprocessor=None,
+    cache_dir=None,
 ):
     """解析或提取并返回 extract_text_from_images 对应的业务数据，保持现有调用约定。"""
     warnings = []
@@ -173,6 +278,7 @@ def extract_text_from_images(
         }
 
     preprocess = image_preprocessor or preprocess_screenshot
+    cache_root = cache_dir or _default_cache_dir()
     accepted_lines = []
     attempted_predictions = 0
     successful_predictions = 0
@@ -182,9 +288,24 @@ def extract_text_from_images(
             continue
         try:
             attempted_predictions += 1
-            prediction = _predict(active_engine, preprocess(image_path))
+            cache_key = _cache_signature(image_path, preprocess, min_confidence)
+            cached_result = _read_cached_result(cache_root, cache_key)
+            if cached_result is not None:
+                successful_predictions += 1
+                for cached_line in cached_result.get("lines") or []:
+                    if not isinstance(cached_line, dict):
+                        continue
+                    accepted_lines.append({
+                        "text": str(cached_line.get("text") or "").strip(),
+                        "confidence": float(cached_line.get("confidence") or 0.0),
+                        "image_index": image_index,
+                        "line_index": int(cached_line.get("line_index") or 0),
+                    })
+                continue
+            prediction = _predict_with_fallback(active_engine, image_path, preprocess, warnings)
             image_lines = _normalize_prediction(prediction)
             successful_predictions += 1
+            cache_lines = []
         except Exception as exc:
             warnings.append(f"OCR failed for {os.path.basename(image_path)}: {exc}")
             logging.exception("Local OCR failed: %s", image_path)
@@ -192,12 +313,26 @@ def extract_text_from_images(
         for line_index, line in enumerate(image_lines):
             if not line["text"] or line["confidence"] < float(min_confidence):
                 continue
+            cache_lines.append({
+                "text": line["text"],
+                "confidence": line["confidence"],
+                "line_index": line_index,
+            })
             accepted_lines.append({
                 "text": line["text"],
                 "confidence": line["confidence"],
                 "image_index": image_index,
                 "line_index": line_index,
             })
+        _write_cached_result(cache_root, cache_key, {
+            "available": True,
+            "engine": "paddleocr",
+            "extracted_text": "\n".join(line["text"] for line in cache_lines),
+            "lines": cache_lines,
+            "average_confidence": round(
+                sum(line["confidence"] for line in cache_lines) / len(cache_lines), 4
+            ) if cache_lines else 0.0,
+        })
 
     average_confidence = 0.0
     if accepted_lines:

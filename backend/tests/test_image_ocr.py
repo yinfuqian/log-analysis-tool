@@ -1,6 +1,22 @@
+import importlib.util
 import tempfile
 import unittest
+import sys
 from pathlib import Path
+
+
+BACKEND_DIR = Path(__file__).resolve().parents[1]
+IMAGE_OCR_PATH = BACKEND_DIR / "app" / "analysis" / "image_ocr.py"
+if str(BACKEND_DIR) not in sys.path:
+    sys.path.insert(0, str(BACKEND_DIR))
+
+
+def load_image_ocr_module():
+    spec = importlib.util.spec_from_file_location("image_ocr_under_test", IMAGE_OCR_PATH)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules["image_ocr_under_test"] = module
+    spec.loader.exec_module(module)
+    return module
 
 
 class FakePaddleEngine:
@@ -15,13 +31,13 @@ class FakePaddleEngine:
 
 class ImageOcrTests(unittest.TestCase):
     def test_python_313_runtime_is_rejected_before_loading_native_ocr(self):
-        from app.analysis.image_ocr import ensure_supported_runtime
+        ensure_supported_runtime = load_image_ocr_module().ensure_supported_runtime
 
         with self.assertRaisesRegex(RuntimeError, "Python 3.10"):
             ensure_supported_runtime((3, 13))
 
     def test_returns_unavailable_when_all_existing_images_fail_prediction(self):
-        from app.analysis.image_ocr import extract_text_from_images
+        extract_text_from_images = load_image_ocr_module().extract_text_from_images
 
         class FailingEngine:
             def predict(self, _image):
@@ -40,11 +56,84 @@ class ImageOcrTests(unittest.TestCase):
         self.assertEqual(result["extracted_text"], "")
         self.assertIn("std::exception", result["warnings"][0])
 
+    def test_reuses_cached_ocr_result_for_same_image_content(self):
+        extract_text_from_images = load_image_ocr_module().extract_text_from_images
+
+        class CountingEngine:
+            def __init__(self):
+                self.calls = 0
+
+            def predict(self, _image):
+                self.calls += 1
+                return [{
+                    "rec_texts": [f"cached line {self.calls}"],
+                    "rec_scores": [0.99],
+                    "rec_polys": [[[10, 10], [200, 10], [200, 30], [10, 30]]],
+                }]
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            cache_dir = Path(temp_dir) / "cache"
+            path = Path(temp_dir) / "screen.png"
+            path.write_bytes(b"fake image content")
+            engine = CountingEngine()
+
+            first = extract_text_from_images(
+                [str(path)],
+                engine=engine,
+                image_preprocessor=lambda value: value,
+                cache_dir=str(cache_dir),
+            )
+            second = extract_text_from_images(
+                [str(path)],
+                engine=CountingEngine(),
+                image_preprocessor=lambda value: value,
+                cache_dir=str(cache_dir),
+            )
+
+        self.assertEqual(engine.calls, 1)
+        self.assertEqual(first["extracted_text"], "cached line 1")
+        self.assertEqual(second["extracted_text"], "cached line 1")
+
+    def test_retries_original_image_when_preprocessed_prediction_fails(self):
+        extract_text_from_images = load_image_ocr_module().extract_text_from_images
+
+        class PreprocessedImageFailingEngine:
+            def __init__(self):
+                self.calls = []
+
+            def predict(self, image):
+                self.calls.append(image)
+                if image == "preprocessed-image":
+                    raise RuntimeError("std::exception")
+                return [{
+                    "rec_texts": ["java.lang.IllegalStateException: failed"],
+                    "rec_scores": [0.97],
+                    "rec_polys": [[[10, 10], [400, 10], [400, 30], [10, 30]]],
+                }]
+
+        engine = PreprocessedImageFailingEngine()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "screen.jpg"
+            path.write_bytes(b"fake image content")
+            result = extract_text_from_images(
+                [str(path)],
+                engine=engine,
+                image_preprocessor=lambda _path: "preprocessed-image",
+            )
+
+        self.assertTrue(result["available"])
+        self.assertEqual(engine.calls, ["preprocessed-image", str(path)])
+        self.assertEqual(result["extracted_text"], "java.lang.IllegalStateException: failed")
+        self.assertIn("preprocessed OCR failed", result["warnings"][0])
+
     def test_preprocessed_screenshot_keeps_three_color_channels_for_paddle(self):
-        import cv2
+        try:
+            import cv2
+        except ModuleNotFoundError:
+            self.skipTest("cv2 is not available in this environment")
         import numpy as np
 
-        from app.analysis.image_ocr import preprocess_screenshot
+        preprocess_screenshot = load_image_ocr_module().preprocess_screenshot
 
         with tempfile.TemporaryDirectory() as temp_dir:
             path = Path(temp_dir) / "screen.png"
@@ -58,7 +147,7 @@ class ImageOcrTests(unittest.TestCase):
         self.assertEqual(processed.shape[2], 3)
 
     def test_combines_multiple_images_and_filters_low_confidence_lines(self):
-        from app.analysis.image_ocr import extract_text_from_images
+        extract_text_from_images = load_image_ocr_module().extract_text_from_images
 
         engine = FakePaddleEngine([
             {
@@ -87,9 +176,9 @@ class ImageOcrTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as temp_dir:
             paths = []
-            for name in ("first.png", "second.png"):
+            for index, name in enumerate(("first.png", "second.png"), start=1):
                 path = Path(temp_dir) / name
-                path.write_bytes(b"fake image content")
+                path.write_bytes(f"fake image content {index}".encode("utf-8"))
                 paths.append(str(path))
             result = extract_text_from_images(
                 paths,
@@ -114,7 +203,7 @@ class ImageOcrTests(unittest.TestCase):
         self.assertAlmostEqual(result["average_confidence"], 0.96, places=2)
 
     def test_returns_unavailable_result_when_runtime_cannot_initialize(self):
-        from app.analysis.image_ocr import extract_text_from_images
+        extract_text_from_images = load_image_ocr_module().extract_text_from_images
 
         def fail_factory():
             raise ImportError("paddleocr is not installed")

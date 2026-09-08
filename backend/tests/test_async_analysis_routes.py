@@ -10,6 +10,7 @@ import time
 import types
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 BACKEND_DIR = Path(__file__).resolve().parents[1]
@@ -273,6 +274,68 @@ class AsyncAnalysisRouteTests(unittest.TestCase):
         self.assertIn("see-management-svc", source_text)
         self.assertIn("调用失败截图", source_text)
         self.assertEqual(ocr_result["engine"], "paddleocr")
+
+    def test_image_chain_context_can_fall_back_to_gpt_when_local_ocr_is_disabled(self):
+        routes, _, _, _, _ = load_routes_module()
+
+        with mock.patch.dict("os.environ", {"LOCAL_OCR_ENABLED": "false"}, clear=False):
+            original_ai = routes.analyze_uploaded_image
+            routes.analyze_uploaded_image = lambda image_paths, image_tag, image_description="": {
+                "summary": "gpt summary",
+                "extracted_text": "GPT image text",
+                "keywords": ["error"],
+                "components": ["api"],
+            }
+            try:
+                source_text, ocr_result = routes.build_chain_relevance_context(
+                    {
+                        "source_type": "image",
+                        "file_path": "/tmp/error.png",
+                        "image_tag": "log_image",
+                        "image_description": "调用失败截图",
+                    },
+                    ocr_extractor=lambda paths: self.fail("local OCR should not be called"),
+                )
+            finally:
+                routes.analyze_uploaded_image = original_ai
+
+        self.assertIn("GPT image text", source_text)
+        self.assertEqual(ocr_result["engine"], "gpt-vision")
+        self.assertTrue(ocr_result["available"])
+
+    def test_image_chain_context_can_fall_back_to_gpt_when_local_ocr_is_low_confidence(self):
+        routes, _, _, _, _ = load_routes_module()
+
+        original_ai = routes.analyze_uploaded_image
+        routes.analyze_uploaded_image = lambda image_paths, image_tag, image_description="": {
+            "summary": "gpt summary",
+            "extracted_text": "GPT image text",
+            "keywords": ["error"],
+            "components": ["api"],
+        }
+        try:
+            source_text, ocr_result = routes.build_chain_relevance_context(
+                {
+                    "source_type": "image",
+                    "file_path": "/tmp/error.png",
+                    "image_tag": "log_image",
+                    "image_description": "调用失败截图",
+                },
+                ocr_extractor=lambda paths: {
+                    "available": True,
+                    "engine": "paddleocr",
+                    "extracted_text": "low confidence text",
+                    "lines": [],
+                    "average_confidence": 0.1,
+                    "warnings": [],
+                },
+            )
+        finally:
+            routes.analyze_uploaded_image = original_ai
+
+        self.assertIn("GPT image text", source_text)
+        self.assertEqual(ocr_result["engine"], "gpt-vision")
+        self.assertTrue(ocr_result["available"])
 
     def test_discovery_response_returns_image_ocr_for_task_reuse(self):
         routes, flask_stub, _, _, _ = load_routes_module()

@@ -5,6 +5,7 @@ import sys
 import types
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 TASKS_PATH = Path(__file__).resolve().parents[1] / "app" / "analysis" / "routes" / "tasks.py"
@@ -72,6 +73,39 @@ class AnalysisTaskProgressTests(unittest.TestCase):
         self.assertIn("NullPointerException", log_content)
         self.assertIn("空指针截图", log_content)
         self.assertEqual(result["average_confidence"], 0.97)
+
+    def test_image_ocr_can_fall_back_to_gpt_when_local_ocr_is_disabled(self):
+        module = load_tasks_module()
+        fallback_calls = []
+
+        with mock.patch.dict("os.environ", {"LOCAL_OCR_ENABLED": "false"}, clear=False):
+            log_content, result = module.build_image_ocr_log_content(
+                {
+                    "image_tag": "log_image",
+                    "image_description": "模糊截图",
+                    "image_ocr": {
+                        "available": False,
+                        "engine": "paddleocr",
+                        "extracted_text": "",
+                        "lines": [],
+                        "average_confidence": 0.0,
+                        "warnings": ["local OCR disabled"],
+                    },
+                },
+                ["/tmp/error.png"],
+                ocr_extractor=lambda paths: fallback_calls.append(paths),
+                image_fallback_extractor=lambda paths, image_tag, image_description: {
+                    "summary": "gpt summary",
+                    "extracted_text": "GPT extracted text",
+                    "keywords": ["error"],
+                    "components": ["api"],
+                },
+            )
+
+        self.assertEqual(fallback_calls, [])
+        self.assertIn("GPT extracted text", log_content)
+        self.assertEqual(result["engine"], "gpt-vision")
+        self.assertTrue(result["available"])
 
     def test_image_task_runs_ocr_before_full_error_extraction(self):
         source = TASKS_PATH.read_text(encoding="utf-8")

@@ -112,17 +112,135 @@ def _normalize_task_image_ocr(payload):
         "lines": [item for item in (data.get("lines") or []) if isinstance(item, dict)],
         "average_confidence": average_confidence,
         "warnings": [str(item) for item in (data.get("warnings") or []) if str(item or "").strip()],
+        "summary": str(data.get("summary") or "").strip(),
+        "keywords": [str(item).strip() for item in (data.get("keywords") or []) if str(item).strip()],
+        "components": [str(item).strip() for item in (data.get("components") or []) if str(item).strip()],
+        "analysis_text": str(data.get("analysis_text") or "").strip(),
+        "scene_summary": str(data.get("scene_summary") or "").strip(),
+        "business_domain": str(data.get("business_domain") or "").strip(),
+        "page_name": str(data.get("page_name") or "").strip(),
+        "user_action": str(data.get("user_action") or "").strip(),
+        "error_message": str(data.get("error_message") or "").strip(),
+        "visible_fields": [str(item).strip() for item in (data.get("visible_fields") or []) if str(item).strip()],
+        "candidate_apis": [str(item).strip() for item in (data.get("candidate_apis") or []) if str(item).strip()],
+        "candidate_code_keywords": [str(item).strip() for item in (data.get("candidate_code_keywords") or []) if str(item).strip()],
+        "missing_context": [item for item in (data.get("missing_context") or []) if isinstance(item, dict)],
     }
 
 
-def build_image_ocr_log_content(data, input_paths, ocr_extractor=None):
-    """构建并返回 build_image_ocr_log_content 对应的业务数据，保持现有调用约定。"""
-    image_ocr = _normalize_task_image_ocr(data.get("image_ocr"))
-    if not image_ocr.get("extracted_text"):
-        enabled = str(os.getenv("LOCAL_OCR_ENABLED", "true")).strip().lower() not in {
-            "0", "false", "no", "off",
+def _task_gpt_fallback_confidence_threshold():
+    configured = os.getenv("OCR_GPT_FALLBACK_CONFIDENCE", "0.6")
+    try:
+        return float(configured)
+    except (TypeError, ValueError):
+        return 0.6
+
+
+def _task_should_use_gpt_vision_fallback(image_ocr):
+    data = image_ocr if isinstance(image_ocr, dict) else {}
+    if str(data.get("engine") or "").strip().lower() == "gpt-vision":
+        return False
+    enabled = str(os.getenv("LOCAL_OCR_ENABLED", "true")).strip().lower() not in {
+        "0", "false", "no", "off",
+    }
+    if not enabled:
+        return True
+    if not data.get("available"):
+        return True
+    if not str(data.get("extracted_text") or "").strip():
+        return True
+    try:
+        confidence = float(data.get("average_confidence") or 0.0)
+    except (TypeError, ValueError):
+        confidence = 0.0
+    return confidence < _task_gpt_fallback_confidence_threshold()
+
+
+def _task_build_gpt_image_ocr_result(image_paths, image_tag, image_description="", image_fallback_extractor=None):
+    image_paths = [path for path in (image_paths or []) if path]
+    if not image_paths:
+        return {
+            "available": False,
+            "engine": "gpt-vision",
+            "extracted_text": "",
+            "lines": [],
+            "average_confidence": 0.0,
+            "warnings": ["no image files available for GPT vision fallback"],
         }
-        if enabled:
+    try:
+        fallback_extractor = image_fallback_extractor
+        if fallback_extractor is None:
+            import importlib
+
+            routes_module = importlib.import_module("app.analysis.routes.routes")
+            fallback_extractor = getattr(routes_module, "analyze" + "_uploaded_image")
+        image_analysis = fallback_extractor(image_paths, image_tag, image_description)
+        extracted_text = str(image_analysis.get("extracted_text") or image_analysis.get("summary") or "").strip()
+        result = {
+            "available": bool(extracted_text),
+            "engine": "gpt-vision",
+            "extracted_text": extracted_text,
+            "lines": [],
+            "average_confidence": 0.0,
+            "warnings": [],
+            "summary": str(image_analysis.get("summary") or "").strip(),
+            "keywords": [str(item).strip() for item in (image_analysis.get("keywords") or []) if str(item).strip()],
+            "components": [str(item).strip() for item in (image_analysis.get("components") or []) if str(item).strip()],
+            "analysis_text": str(image_analysis.get("analysis_text") or "").strip(),
+        }
+        if not result["available"]:
+            result["warnings"].append("GPT vision fallback returned no usable text")
+        return result
+    except Exception as exc:
+        logging.exception("GPT vision fallback failed in task pipeline")
+        return {
+            "available": False,
+            "engine": "gpt-vision",
+            "extracted_text": "",
+            "lines": [],
+            "average_confidence": 0.0,
+            "warnings": [str(exc)],
+        }
+
+
+def build_image_ocr_log_content(data, input_paths, ocr_extractor=None, image_fallback_extractor=None):
+    """构建并返回 build_image_ocr_log_content 对应的业务数据，保持现有调用约定。"""
+    image_ocr_source = data.get("image_ocr")
+    image_ocr = _normalize_task_image_ocr(image_ocr_source)
+    has_supplied_ocr = isinstance(image_ocr_source, dict)
+    local_ocr_enabled = str(os.getenv("LOCAL_OCR_ENABLED", "true")).strip().lower() not in {
+        "0", "false", "no", "off",
+    }
+
+    image_tag = str(data.get("image_tag") or "").strip()
+    image_description = str(data.get("image_description") or "").strip()
+    if image_ocr.get("engine") == "gpt-vision" and image_ocr.get("extracted_text"):
+        pass
+    elif has_supplied_ocr and image_ocr.get("extracted_text") and not _task_should_use_gpt_vision_fallback(image_ocr):
+        pass
+    else:
+        if has_supplied_ocr:
+            gpt_result = _task_build_gpt_image_ocr_result(
+                input_paths,
+                image_tag,
+                image_description,
+                image_fallback_extractor=image_fallback_extractor,
+            )
+            if gpt_result.get("available"):
+                image_ocr = _normalize_task_image_ocr(gpt_result)
+            elif image_ocr.get("extracted_text"):
+                image_ocr["warnings"].extend(gpt_result.get("warnings") or [])
+            else:
+                image_ocr = _normalize_task_image_ocr(gpt_result)
+        elif not local_ocr_enabled:
+            gpt_result = _task_build_gpt_image_ocr_result(
+                input_paths,
+                image_tag,
+                image_description,
+                image_fallback_extractor=image_fallback_extractor,
+            )
+            image_ocr = _normalize_task_image_ocr(gpt_result)
+        else:
             try:
                 if ocr_extractor is None:
                     from app.analysis.image_ocr import extract_text_from_images
@@ -136,13 +254,30 @@ def build_image_ocr_log_content(data, input_paths, ocr_extractor=None):
             except Exception as exc:
                 logging.exception("Local OCR task fallback failed")
                 image_ocr["warnings"].append(str(exc))
+            if _task_should_use_gpt_vision_fallback(image_ocr):
+                gpt_result = _task_build_gpt_image_ocr_result(
+                    input_paths,
+                    image_tag,
+                    image_description,
+                    image_fallback_extractor=image_fallback_extractor,
+                )
+                if gpt_result.get("available"):
+                    image_ocr = _normalize_task_image_ocr(gpt_result)
+                else:
+                    image_ocr["warnings"].extend(gpt_result.get("warnings") or [])
 
     metadata = [
         f"image_tag: {data.get('image_tag') or ''}",
         f"image_description: {data.get('image_description') or ''}",
         "image_files: " + ", ".join(os.path.basename(path) for path in input_paths or []),
     ]
-    log_content = "\n".join(filter(None, [image_ocr.get("extracted_text"), *metadata]))
+    log_parts = [image_ocr.get("extracted_text")]
+    if image_ocr.get("summary"):
+        log_parts.append(f"image_summary: {image_ocr.get('summary')}")
+    if image_ocr.get("analysis_text"):
+        log_parts.append(image_ocr.get("analysis_text"))
+    log_parts.extend(metadata)
+    log_content = "\n".join(filter(None, log_parts))
     return log_content, image_ocr
 
 

@@ -2353,6 +2353,36 @@ def _local_ocr_enabled():
     return str(configured).strip().lower() not in {"0", "false", "no", "off"}
 
 
+def _gpt_vision_fallback_confidence_threshold():
+    """处理 _gpt_vision_fallback_confidence_threshold 对应的业务步骤，并向调用方返回所需结果。"""
+    configured = app.config.get(
+        "OCR_GPT_FALLBACK_CONFIDENCE",
+        os.getenv("OCR_GPT_FALLBACK_CONFIDENCE", "0.6"),
+    )
+    try:
+        return float(configured)
+    except (TypeError, ValueError):
+        return 0.6
+
+
+def should_use_gpt_vision_fallback(image_ocr):
+    """判断 should_use_gpt_vision_fallback 对应的业务数据，保持现有调用约定。"""
+    data = image_ocr if isinstance(image_ocr, dict) else {}
+    if str(data.get("engine") or "").strip().lower() == "gpt-vision":
+        return False
+    if not _local_ocr_enabled():
+        return True
+    if not data.get("available"):
+        return True
+    if not str(data.get("extracted_text") or "").strip():
+        return True
+    try:
+        confidence = float(data.get("average_confidence") or 0.0)
+    except (TypeError, ValueError):
+        confidence = 0.0
+    return confidence < _gpt_vision_fallback_confidence_threshold()
+
+
 def _empty_image_ocr_result(warning=""):
     """处理 _empty_image_ocr_result 对应的业务步骤，并向调用方返回所需结果。"""
     return {
@@ -2363,6 +2393,59 @@ def _empty_image_ocr_result(warning=""):
         "average_confidence": 0.0,
         "warnings": [warning] if warning else [],
     }
+
+
+def build_gpt_image_ocr_result(image_paths, image_tag, image_description="", image_fallback_extractor=None):
+    """构建并返回 build_gpt_image_ocr_result 对应的业务数据，保持现有调用约定。"""
+    image_paths = [path for path in (image_paths or []) if path]
+    if not image_paths:
+        return {
+            "available": False,
+            "engine": "gpt-vision",
+            "extracted_text": "",
+            "lines": [],
+            "average_confidence": 0.0,
+            "warnings": ["no image files available for GPT vision fallback"],
+        }
+    fallback_extractor = image_fallback_extractor or analyze_uploaded_image
+    try:
+        image_analysis = fallback_extractor(image_paths, image_tag, image_description)
+        normalized = normalize_image_analysis(image_tag, image_analysis, image_description=image_description)
+        extracted_text = normalized.get("extracted_text") or normalized.get("summary") or ""
+        result = {
+            "available": bool(extracted_text),
+            "engine": "gpt-vision",
+            "extracted_text": extracted_text,
+            "lines": [],
+            "average_confidence": 0.0,
+            "warnings": [],
+            "summary": normalized.get("summary"),
+            "keywords": normalized.get("keywords"),
+            "components": normalized.get("components"),
+            "scene_summary": normalized.get("scene_summary"),
+            "business_domain": normalized.get("business_domain"),
+            "page_name": normalized.get("page_name"),
+            "user_action": normalized.get("user_action"),
+            "error_message": normalized.get("error_message"),
+            "visible_fields": normalized.get("visible_fields"),
+            "candidate_apis": normalized.get("candidate_apis"),
+            "candidate_code_keywords": normalized.get("candidate_code_keywords"),
+            "missing_context": normalized.get("missing_context"),
+            "analysis_text": normalized.get("analysis_text"),
+        }
+        if not result["available"]:
+            result["warnings"].append("GPT vision fallback returned no usable text")
+        return result
+    except Exception as exc:
+        logging.exception("GPT vision fallback failed")
+        return {
+            "available": False,
+            "engine": "gpt-vision",
+            "extracted_text": "",
+            "lines": [],
+            "average_confidence": 0.0,
+            "warnings": [str(exc)],
+        }
 
 
 def normalize_image_ocr_payload(payload):
@@ -2399,22 +2482,57 @@ def normalize_image_ocr_payload(payload):
     }
 
 
-def build_chain_relevance_context(data, ocr_extractor=None):
+def build_chain_relevance_context(data, ocr_extractor=None, image_fallback_extractor=None):
     """构建并返回 build_chain_relevance_context 对应的业务数据，保持现有调用约定。"""
     metadata_text = build_chain_relevance_input(data)
     if str(data.get("source_type") or "file").lower() != "image":
         return metadata_text, None
 
-    supplied_ocr = normalize_image_ocr_payload(data.get("image_ocr"))
-    if supplied_ocr.get("extracted_text"):
+    supplied_ocr_source = data.get("image_ocr")
+    supplied_ocr = normalize_image_ocr_payload(supplied_ocr_source)
+    has_supplied_ocr = isinstance(supplied_ocr_source, dict)
+    if supplied_ocr.get("engine") == "gpt-vision" and supplied_ocr.get("extracted_text"):
         return "\n".join(filter(None, [supplied_ocr["extracted_text"], metadata_text])), supplied_ocr
-    if not _local_ocr_enabled():
-        ocr_result = _empty_image_ocr_result("local OCR is disabled")
-        return metadata_text, ocr_result
+    if has_supplied_ocr and supplied_ocr.get("extracted_text") and not should_use_gpt_vision_fallback(supplied_ocr):
+        return "\n".join(filter(None, [supplied_ocr["extracted_text"], metadata_text])), supplied_ocr
 
     input_paths = [path for path in (data.get("file_paths") or []) if path]
     if data.get("file_path") and data.get("file_path") not in input_paths:
         input_paths.insert(0, data.get("file_path"))
+
+    image_tag = str(data.get("image_tag") or "").strip()
+    image_description = str(data.get("image_description") or "").strip()
+
+    if has_supplied_ocr and should_use_gpt_vision_fallback(supplied_ocr):
+        ocr_result = build_gpt_image_ocr_result(
+            input_paths,
+            image_tag,
+            image_description,
+            image_fallback_extractor=image_fallback_extractor,
+        )
+        if ocr_result.get("available"):
+            return "\n".join(filter(None, [ocr_result.get("extracted_text"), metadata_text])), ocr_result
+        if supplied_ocr.get("extracted_text"):
+            return "\n".join(filter(None, [supplied_ocr["extracted_text"], metadata_text])), supplied_ocr
+        warnings = supplied_ocr.get("warnings") or []
+        if ocr_result.get("warnings"):
+            warnings = [*warnings, *ocr_result.get("warnings")]
+        return metadata_text, {
+            **ocr_result,
+            "warnings": warnings,
+        }
+
+    if not has_supplied_ocr and not _local_ocr_enabled():
+        ocr_result = build_gpt_image_ocr_result(
+            input_paths,
+            image_tag,
+            image_description,
+            image_fallback_extractor=image_fallback_extractor,
+        )
+        if ocr_result.get("available"):
+            return "\n".join(filter(None, [ocr_result.get("extracted_text"), metadata_text])), ocr_result
+        return metadata_text, ocr_result
+
     try:
         if ocr_extractor is None:
             from app.analysis.image_ocr import extract_text_from_images
@@ -2427,6 +2545,15 @@ def build_chain_relevance_context(data, ocr_extractor=None):
         except TypeError:
             raw_result = ocr_extractor(input_paths)
         ocr_result = normalize_image_ocr_payload(raw_result)
+        if should_use_gpt_vision_fallback(ocr_result):
+            gpt_result = build_gpt_image_ocr_result(
+                input_paths,
+                image_tag,
+                image_description,
+                image_fallback_extractor=image_fallback_extractor,
+            )
+            if gpt_result.get("available"):
+                ocr_result = gpt_result
     except Exception as exc:
         logging.exception("Local OCR context extraction failed")
         ocr_result = _empty_image_ocr_result(str(exc))
