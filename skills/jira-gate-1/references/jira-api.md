@@ -1,12 +1,23 @@
 # Jira 取数与写评论细节
 
-面向 `jira-gate-1` skill 的实现说明。基础地址：`https://jira.in.wezhuiyi.com`（Jira 10.3.9 Server / Data Center，站点名"Jira-追一研发管理系统"）。
+面向 `jira-gate-1` skill 的实现说明。站点为 Jira 10.3.9 Server / Data Center（生产站点名"Jira-追一研发管理系统"）。
+
+**基础地址不要写死**，`jira.mjs` 按以下优先级解析 `baseUrl`：
+
+1. 函数入参 `options.baseUrl` / 命令行 `--base-url`
+2. 环境变量 `JIRA_BASE_URL`
+3. 令牌文件里的 `baseUrl`（仅 JSON 配置支持）
+4. 内置默认值 `DEFAULT_BASE_URL`（生产 Jira）
+
+容器环境由 `.env` 注入 `JIRA_BASE_URL`（例如测试站），优先级高于令牌文件，因此只要该变量存在就不会误连生产。
+`selftest()` 返回的 `baseUrlSource` 字段会标明本次地址来自哪一级，**执行前先看它**，确认打在预期的站点上。
 
 ## 1. 为什么必须走 node_repl
 
 - Codex 的 PowerShell 沙箱无法建立 TLS 连接（报 `安全包中没有可用的凭证` / `SSL connection could not be established`），即便放通网络权限也一样，因此**不能用 `Invoke-WebRequest` / `curl` 访问 Jira**。
 - `node_repl` 的 Node 进程不受该限制，`fetch` 可正常访问 Jira。
-- `node_repl` 内的约束：没有 `process`（读不到环境变量）、不支持静态 `import`、`eval` 被禁用。因此 skill 脚本一律用 `await import()` 动态加载，令牌从文件读取。
+- `node_repl` 内的约束：没有 `process`、不支持静态 `import`、`eval` 被禁用。因此 skill 脚本一律用 `await import()` 动态加载。
+  环境变量经 `readEnv()` 探测（无 `process` 时安全返回空值），所以同一份脚本在桌面端与容器里都能用：桌面端读不到环境变量就回退令牌文件，容器里则由 `JIRA_TOKEN` / `JIRA_BASE_URL` 注入。
 - `node_repl` 会缓存已导入模块；改了脚本后用 `import("file:///...jira.mjs?v=时间戳")` 强制重新加载。
 
 ## 2. 认证
@@ -15,13 +26,17 @@
 
 创建：Jira → 右上角头像 → 个人访问令牌 → 创建令牌。请求头：`Authorization: Bearer <token>`。
 
-存放位置（`jira.mjs` 的查找顺序）：
+凭证解析优先级：入参 `token` / 命令行 `--token` → 环境变量 `JIRA_TOKEN` → 令牌文件。
 
-1. `<skill 目录>\.jira-token`、`.jira-token.txt`、`jira-token.txt`
-2. `<skill 目录>\..\jira-token.txt`（即 `~/.codex/skills/jira-token.txt`）
+令牌文件的查找顺序（路径在 Windows 与 Linux 下都适用）：
+
+1. `<skill 目录>/.jira-token`、`.jira-token.txt`、`jira-token.txt`
+2. `<skill 目录>/../` 下的同名文件
 3. `~/.codex/jira-token.txt`
-4. `~/.codex/jira\token.txt`
-5. `~/.codex/jira\config.json`，内容形如 `{"token":"...","baseUrl":"https://jira.in.wezhuiyi.com"}`
+4. `~/.codex/jira/token.txt`
+5. `~/.codex/jira/config.json`，内容形如 `{"token":"...","baseUrl":"<按环境填写>"}`
+
+其中 3、4、5 对应「skill 目录往上两级」，因此技能装在 `~/.codex/skills/<skill_id>/` 时可直接命中。
 
 文件内容为单行令牌即可，也支持 `JIRA_PAT=xxx` 形式。脚本按行读取第一行非空内容，不会回显令牌。
 
@@ -59,7 +74,7 @@ Jira 错误响应形如 `{"errorMessages":["..."],"errors":{...}}`，`jira.mjs` 
 
 ## 5. 浏览器兜底通道的操作要点
 
-1. `cua.createBrowserTab("iab", "https://jira.in.wezhuiyi.com/browse/KEY", { visible: false })` 打开单子。
+1. `cua.createBrowserTab("iab", "<baseUrl>/browse/KEY", { visible: false })` 打开单子；`<baseUrl>` 取上述解析结果（容器内即 `JIRA_BASE_URL`），**不要写死生产域名**。
 2. `await tab.playwright.evaluate(() => document.body.innerText)` 取正文——描述、详情字段、附件列表、问题链接、子任务、评论区都在其中。
 3. 附件下载：定位附件链接后触发下载，再到下载目录跑 `extract.py`（压缩包会自动解压，见 §6.6）。
 4. 写评论：在评论区输入文本并提交（这是对外发布内容，写入前必须让用户确认）。

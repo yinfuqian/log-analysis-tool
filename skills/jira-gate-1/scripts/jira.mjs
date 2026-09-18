@@ -2,7 +2,7 @@
  * jira.mjs —— Jira 需求准入预检客户端（在 Codex 的 node_repl 中运行）
  *
  * 运行环境约束（node_repl 沙箱）：
- *   - 没有 `process`，不能读环境变量；凭证从令牌文件读取，或由调用方显式传入
+ *   - 没有 `process`：环境变量一律经 readEnv() 探测，缺失时回退到令牌文件与调用方入参
  *   - 不支持静态 import，模块内一律使用 await import()
  *   - 网络只能通过本模块内的 fetch 访问（PowerShell 沙箱下 TLS 被拦截）
  *
@@ -15,6 +15,17 @@ export const DEFAULT_BASE_URL = "https://jira.in.wezhuiyi.com";
 
 /** 允许的凭证文件候选位置（相对 skill 目录与 ~/.codex） */
 const TOKEN_FILE_NAMES = [".jira-token", ".jira-token.txt", "jira-token.txt"];
+
+/** 安全读取环境变量：node_repl 沙箱里没有 process，缺失时返回空字符串 */
+function readEnv(name) {
+  try {
+    if (typeof process === "undefined" || !process || !process.env) return "";
+    const value = process.env[name];
+    return value ? String(value).trim() : "";
+  } catch (e) {
+    return "";
+  }
+}
 
 /** 门禁字段默认候选名（按优先级匹配）；可用 config.json 的 gateResultField / gateDifficultyField / gateCheckedAtField 覆盖 */
 const DEFAULT_GATE_FIELD_NAMES = {
@@ -48,8 +59,14 @@ export function parseIssueKey(input) {
 export function skillDir() {
   try {
     const raw = import.meta.url;
-    const m = String(raw).match(/^file:\/\/\/(.+)\/scripts\/jira\.mjs/);
-    if (m) return m[1].replace(/\//g, "\\");
+    // 末尾可能带 ?v=时间戳 之类的查询串（用于 node_repl 强制重新加载），一并容忍。
+    const m = String(raw).match(/^file:\/\/\/(.+?)\/scripts\/jira\.mjs(\?.*)?$/);
+    if (!m) return null;
+    let dir = m[1];
+    try { dir = decodeURIComponent(dir); } catch (e) { /* 解码失败时保留原样 */ }
+    // file:///C:/... 与 file:///home/... 解析后都用正斜杠，Windows 与 Linux 的 fs/path 都接受，
+    // 因此不再替换成反斜杠（旧实现在 Linux 容器里会拼出无效路径）。
+    return dir;
   } catch (e) { /* ignore */ }
   return null;
 }
@@ -68,12 +85,14 @@ export async function resolveToken(explicit) {
   const dir = skillDir();
   const candidates = [];
   if (dir) {
-    for (const name of TOKEN_FILE_NAMES) candidates.push(normalize(`${dir}\\${name}`));
-    for (const name of TOKEN_FILE_NAMES) candidates.push(normalize(`${dir}\\..\\${name}`));
-    candidates.push(normalize(`${dir}\\..\\..\\jira-token.txt`));
-    candidates.push(normalize(`${dir}\\..\\..\\jira\\token.txt`));
-    candidates.push(normalize(`${dir}\\..\\..\\jira\\config.json`));
+    // 统一用正斜杠拼接：Windows 与 Linux 下 path.resolve 都能正确解析。
+    for (const name of TOKEN_FILE_NAMES) candidates.push(normalize(`${dir}/${name}`));
+    for (const name of TOKEN_FILE_NAMES) candidates.push(normalize(`${dir}/../${name}`));
+    candidates.push(normalize(`${dir}/../../jira-token.txt`));
+    candidates.push(normalize(`${dir}/../../jira/token.txt`));
+    candidates.push(normalize(`${dir}/../../jira/config.json`));
   }
+  let fromFile = null;
   for (const file of candidates) {
     try {
       if (!fs.existsSync(file)) continue;
@@ -83,21 +102,51 @@ export async function resolveToken(explicit) {
       if (text.startsWith("{")) {
         const cfg = JSON.parse(text);
         if (cfg.token) {
-          return {
+          fromFile = {
             token: String(cfg.token).trim(),
             source: file,
             baseUrl: cfg.baseUrl,
             auth: cfg.auth,
             username: cfg.username,
           };
+          break;
         }
         continue;
       }
       const firstLine = text.split(/\r?\n/).find((line) => line.trim()) || "";
       const token = firstLine.replace(/^JIRA_PAT\s*=\s*/i, "").trim();
-      if (token) return { token, source: file };
+      if (token) {
+        fromFile = { token, source: file };
+        break;
+      }
     } catch (e) { /* 忽略单个候选文件的读取错误 */ }
   }
+  // 环境变量优先于令牌文件，与 jira-cli.mjs 的优先级保持一致：容器内 JIRA_BASE_URL 能压住
+  // 令牌文件里的地址，避免误连生产 Jira。node_repl 沙箱没有 process，readEnv 返回空值，
+  // 此时行为与原先完全一致（只用令牌文件）。
+  const envToken = readEnv("JIRA_TOKEN");
+  const envBaseUrl = readEnv("JIRA_BASE_URL");
+  if (envToken) {
+    return {
+      token: envToken,
+      source: "环境变量 JIRA_TOKEN",
+      baseUrl: envBaseUrl || (fromFile && fromFile.baseUrl),
+      auth: fromFile && fromFile.auth,
+      username: fromFile && fromFile.username,
+    };
+  }
+  if (envBaseUrl) {
+    const cred = fromFile || { token: null, source: null, checked: candidates };
+    return {
+      token: cred.token,
+      source: cred.source,
+      baseUrl: envBaseUrl,
+      auth: cred.auth,
+      username: cred.username,
+      checked: cred.checked,
+    };
+  }
+  if (fromFile) return fromFile;
   return { token: null, source: null, checked: candidates };
 }
 
@@ -116,7 +165,7 @@ export function buildAuthHeader(cred) {
 /** 统一发起 REST 请求 */
 export async function request(method, apiPath, options = {}) {
   const cred = await resolveToken(options.token || null);
-  const baseUrl = (options.baseUrl || cred.baseUrl || DEFAULT_BASE_URL).replace(/\/+$/, "");
+  const baseUrl = (options.baseUrl || cred.baseUrl || readEnv("JIRA_BASE_URL") || DEFAULT_BASE_URL).replace(/\/+$/, "");
   const headers = { Accept: "application/json", "X-Atlassian-Token": "no-check" };
   if (cred.token) headers.Authorization = buildAuthHeader(cred);
   let payload;
@@ -210,7 +259,7 @@ export function isEmptyValue(value) {
 export function normalizeIssue(raw) {
   const f = raw.fields || {};
   const names = raw.names || {};
-  const baseUrl = (raw.self || "").split("/rest/")[0] || DEFAULT_BASE_URL;
+  const baseUrl = (raw.self || "").split("/rest/")[0] || readEnv("JIRA_BASE_URL") || DEFAULT_BASE_URL;
 
   const customFields = {};
   for (const [id, name] of Object.entries(names)) {
@@ -468,8 +517,9 @@ export async function loadConfig() {
   const dir = skillDir();
   const candidates = [];
   if (dir) {
-    candidates.push(path.resolve(`${dir}\\jira-config.json`));
-    candidates.push(path.resolve(`${dir}\\..\\..\\jira\\config.json`));
+    // 同样统一用正斜杠拼接，保证容器（Linux）下也能命中。
+    candidates.push(path.resolve(`${dir}/jira-config.json`));
+    candidates.push(path.resolve(`${dir}/../../jira/config.json`));
   }
   for (const file of candidates) {
     try {
@@ -563,7 +613,12 @@ export async function selftest(options = {}) {
   const cred = options.token ? { token: options.token, source: "argument" } : await resolveToken(null);
   result.tokenSource = cred.source || null;
   result.checkedPaths = cred.checked || null;
-  result.baseUrl = options.baseUrl || cred.baseUrl || DEFAULT_BASE_URL;
+  result.baseUrl = options.baseUrl || cred.baseUrl || readEnv("JIRA_BASE_URL") || DEFAULT_BASE_URL;
+  // 显式标注地址来源：避免在容器内静默连到生产 Jira 而无法察觉。
+  if (options.baseUrl) result.baseUrlSource = "调用参数";
+  else if (readEnv("JIRA_BASE_URL")) result.baseUrlSource = "环境变量 JIRA_BASE_URL";
+  else if (cred.baseUrl) result.baseUrlSource = "令牌文件";
+  else result.baseUrlSource = "内置默认值（生产 Jira）";
   result.auth = String(cred.auth || "bearer").toLowerCase();
   if (!cred.token) {
     result.steps.push({ step: "读取令牌", ok: false, detail: "未找到令牌文件；请把令牌放到 skill 目录、~/.codex/jira-token.txt 或 ~/.codex/jira/config.json" });

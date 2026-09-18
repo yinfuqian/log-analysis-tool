@@ -69,7 +69,7 @@ metadata:
 在 `node_repl` 工具里执行下面的代码。**注意本机沙箱限制**：PowerShell 无法建立 TLS 连接，`node_repl` 是唯一能访问 Jira 的通道；`node_repl` 内没有 `process`、不支持静态 import，所以脚本必须用 `await import()` 动态加载，且**不要在 node_repl 顶层引用 `process`**。
 
 ```javascript
-// <SKILL_DIR> = 本 SKILL.md 所在目录的绝对路径（如 C:/Users/xxx/.codex/skills/jira-gate-1）
+// <SKILL_DIR> = 本 SKILL.md 所在目录的绝对路径（如 ~/.codex/skills/jira-gate-1 或容器内 /data/skills/jira-gate-1）
 const j = await import("file:///<SKILL_DIR>/scripts/jira.mjs");
 const st = await j.selftest();              // 先自检：令牌、连通性、账号
 nodeRepl.write(JSON.stringify(st, null, 1));
@@ -304,7 +304,9 @@ h4. 检查项
 
 ## 令牌配置
 
-`jira.mjs` 按顺序查找令牌文件：skill 目录下的 `.jira-token` / `.jira-token.txt` / `jira-token.txt`、`~/.codex/jira-token.txt`、`~/.codex/jira/config.json`（支持 `{"token":"...","baseUrl":"..."}`）。
+凭证与地址解析顺序：入参 → 环境变量（`JIRA_TOKEN`、`JIRA_BASE_URL`）→ 令牌文件。令牌文件按序查找 skill 目录下的 `.jira-token` / `.jira-token.txt` / `jira-token.txt`、`~/.codex/jira-token.txt`、`~/.codex/jira/config.json`（支持 `{"token":"...","baseUrl":"..."}`）。
+
+`selftest()` 返回的 `baseUrl` 与 `baseUrlSource` 会标明本次实际访问的站点及来源；**若 `baseUrlSource` 是「内置默认值（生产 Jira）」而当前并非生产环境，先停下来修配置，不要继续写评论。**
 
 - 令牌来源：Jira → 右上角头像 → 个人访问令牌 → 创建令牌（Jira 10.3 Server 已启用 PAT）。
 - 令牌只用于 `Authorization: Bearer`，不要打印、回显或写进报告文件。
