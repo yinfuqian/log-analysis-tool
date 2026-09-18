@@ -12,6 +12,7 @@ from app.git.routes import git_bp
 from app.logfile.routes.routes import logfile_bp
 from app.modules.routes.routes import module_bp
 from app.product.routes.routes import product_bp
+from app.skillrun.routes.routes import skill_bp
 from app.auth.middleware import install_authentication
 from app.auth.account_requests import build_account_request_service
 from app.auth.routes import auth_bp
@@ -61,6 +62,7 @@ def create_app(config_overrides=None, redis_client=None):
     app.register_blueprint(logfile_bp, url_prefix="/logfile")
     app.register_blueprint(analysis_bp, url_prefix="/analysis")
     app.register_blueprint(git_bp, url_prefix="/git")
+    app.register_blueprint(skill_bp, url_prefix="/skill")
     app.register_blueprint(dashboard_bp, url_prefix="/dashboard")
     install_operation_audit(app)
     install_authentication(app, session_service)

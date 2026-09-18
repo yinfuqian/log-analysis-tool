@@ -32,6 +32,18 @@ Copy-Item -LiteralPath (Join-Path $projectRoot "deploy/.env.production.example")
 Copy-Item -LiteralPath (Join-Path $projectRoot "deploy/users.example.csv") -Destination $staging
 Copy-Item -LiteralPath (Join-Path $projectRoot "deploy/README.md") -Destination $staging
 
+# 技能定义随部署包一起发布；技能令牌等本地文件不打包。
+Copy-Item -LiteralPath (Join-Path $projectRoot "skills") -Destination $staging -Recurse
+
+$stagedSkills = Join-Path $staging "skills"
+if (Test-Path -LiteralPath $stagedSkills) {
+    $tokenFiles = Get-ChildItem -LiteralPath $stagedSkills -Recurse -Force |
+        Where-Object { $_.Name -in @(".jira-token", ".jira-token.txt", "jira-token.txt") }
+    foreach ($tokenFile in $tokenFiles) {
+        Remove-Item -LiteralPath $tokenFile.FullName -Force
+    }
+}
+
 $archivePath = Join-Path $outputPath "fault-analysis-production-deploy-$Version.zip"
 if (Test-Path -LiteralPath $archivePath) {
     Remove-Item -LiteralPath $archivePath -Force

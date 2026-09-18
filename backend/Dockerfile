@@ -1,15 +1,26 @@
 # 故障分析工具后端镜像采用多阶段构建，最终运行镜像不携带测试、配置和默认用户密码文件。
 ARG PYTHON_BASE_IMAGE=docker.m.daocloud.io/library/python:3.10-slim-bookworm
+# 技能执行需要容器内具备 Node.js 运行时与 Codex CLI，运行时镜像复用 Node 官方镜像中的产物。
+ARG NODE_BASE_IMAGE=docker.m.daocloud.io/library/node:20-bookworm-slim
+ARG CODEX_CLI_VERSION=0.142.5
+ARG NPM_REGISTRY=https://registry.npmmirror.com
+
+FROM ${NODE_BASE_IMAGE} AS node-runtime
 
 FROM ${PYTHON_BASE_IMAGE} AS base
 
+# 技能目录与 CODEX_HOME 分开：CODEX_HOME 只承载 Codex 自身状态，技能由宿主机目录只读挂载，
+# 避免 Codex 运行时把内置技能和状态库（state/logs/goals 等 *.sqlite）写进业务技能目录。
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
     FLASK_APP=app.py \
     AUTH_USERS_FILE=/data/users.csv \
     PADDLE_PDX_CACHE_HOME=/data/paddle-cache \
-    REPO_CACHE_DIR=/tmp/fault-analyzer-repos
+    REPO_CACHE_DIR=/tmp/fault-analyzer-repos \
+    SKILLS_DIR=/data/skills \
+    SKILL_WORKSPACE_DIR=/data/skill-workspace \
+    CODEX_HOME=/data/codex
 
 WORKDIR /app
 
@@ -28,10 +39,11 @@ RUN if [ -f /etc/apt/sources.list.d/debian.sources ]; then \
 FROM base AS build
 
 # 构建阶段安装完整依赖并复制源码，用于编译检查、应用检查、Worker 检查和真实 OCR 预测。
-COPY requirements.txt requirements-ocr.txt ./
+COPY requirements.txt requirements-ocr.txt requirements-skill.txt ./
 RUN python -m pip install --upgrade pip \
     && python -m pip install -i "${PIP_INDEX_URL}" -r requirements.txt \
-    && python -m pip install -i "${PIP_INDEX_URL}" -r requirements-ocr.txt
+    && python -m pip install -i "${PIP_INDEX_URL}" -r requirements-ocr.txt \
+    && python -m pip install -i "${PIP_INDEX_URL}" -r requirements-skill.txt
 
 COPY . .
 
@@ -48,8 +60,20 @@ RUN find /app -type f -name '*.sh' -exec sed -i 's/\r$//' {} + \
 
 FROM base AS runtime
 
+ARG CODEX_CLI_VERSION
+ARG NPM_REGISTRY
+
 # 最终阶段使用白名单复制运行依赖和业务文件，避免把源码仓库中的测试、环境文件和临时产物带入生产。
 COPY --from=build /usr/local /usr/local
+# 集成 Node.js 与 Codex CLI，使接口能够在容器内以子进程方式执行技能。
+COPY --from=node-runtime /usr/local/bin/node /usr/local/bin/node
+COPY --from=node-runtime /usr/local/lib/node_modules /usr/local/lib/node_modules
+RUN ln -sf /usr/local/lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
+    && ln -sf /usr/local/lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx \
+    && npm install -g --registry="${NPM_REGISTRY}" "@openai/codex@${CODEX_CLI_VERSION}" \
+    && node --version \
+    && codex --version
+
 COPY --from=build /app/app /app/app
 COPY --from=build /app/migrations /app/migrations
 COPY --from=build /app/app.py /app/app.py
@@ -66,7 +90,7 @@ COPY --from=build /app/start_worker.sh /app/start_worker.sh
 COPY --from=build /data/paddle-cache /data/paddle-cache
 
 RUN chmod +x /app/docker-entrypoint.sh /app/migrate_db.sh /app/start.sh /app/start_worker.sh \
-    && mkdir -p /data/upload /app/app/logs /tmp/fault-analyzer-repos
+    && mkdir -p /data/upload /data/skills /data/codex /data/skill-workspace /app/app/logs /tmp/fault-analyzer-repos
 
 EXPOSE 5000
 

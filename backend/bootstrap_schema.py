@@ -130,6 +130,34 @@ DDL_STATEMENTS = [
     )
     """,
     """
+    CREATE TABLE IF NOT EXISTS skill_run_records (
+        id INTEGER NOT NULL AUTO_INCREMENT,
+        task_id VARCHAR(64) NOT NULL,
+        skill_id VARCHAR(64) NOT NULL,
+        jira_url VARCHAR(500),
+        inputs TEXT,
+        status VARCHAR(32) NOT NULL,
+        stage VARCHAR(64),
+        progress TEXT,
+        result_text TEXT,
+        error_message TEXT,
+        codex_session_id VARCHAR(128),
+        workspace_dir VARCHAR(500),
+        requested_by VARCHAR(255),
+        exit_code INTEGER,
+        duration_ms INTEGER,
+        created_at DATETIME NOT NULL,
+        started_at DATETIME,
+        finished_at DATETIME,
+        PRIMARY KEY (id),
+        UNIQUE KEY ix_skill_run_records_task_id (task_id),
+        KEY ix_skill_run_records_skill_id (skill_id),
+        KEY ix_skill_run_records_status (status),
+        KEY ix_skill_run_records_requested_by (requested_by),
+        KEY ix_skill_run_records_created_at (created_at)
+    )
+    """,
+    """
     CREATE TABLE IF NOT EXISTS analysis_knowledge_cases (
         id INTEGER NOT NULL AUTO_INCREMENT,
         product_id INTEGER NOT NULL,

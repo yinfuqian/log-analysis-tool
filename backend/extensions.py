@@ -1,6 +1,7 @@
 """extensions 模块负责本文件相关的业务流程、数据转换与依赖协作。"""
 from flask_sqlalchemy import SQLAlchemy
 from flask_migrate import Migrate
+from flask import has_app_context
 from redis import Redis
 from celery import Celery
 
@@ -47,7 +48,9 @@ def init_celery(app):
     class FlaskContextTask(celery.Task):
         """FlaskContextTask 类封装该领域对象的状态、依赖与相关行为。"""
         def __call__(self, *args, **kwargs):
-            """处理 __call__ 对应的业务步骤，并向调用方返回所需结果。"""
+            """已有应用上下文时直接复用，否则使用 Worker 启动时绑定的应用。"""
+            if has_app_context():
+                return self.run(*args, **kwargs)
             with app.app_context():
                 return self.run(*args, **kwargs)
 

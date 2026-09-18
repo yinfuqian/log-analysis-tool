@@ -1,0 +1,5 @@
+# 技能（Codex Agent）运行时依赖：Jira 技能附件解析需要读取常见文档格式。
+pdfplumber==0.11.4
+python-docx==1.1.2
+openpyxl==3.1.5
+python-pptx==1.0.2

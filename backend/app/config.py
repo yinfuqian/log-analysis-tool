@@ -81,6 +81,42 @@ def _resolve_auth_users_file():
         return configured_path
     return str((backend_dir / users_path).resolve())
 
+
+# 技能执行（Codex Agent）的内置默认值：与 Dockerfile、docker-compose 中的容器路径保持一致。
+# 部署时除密钥 CODEX_API_KEY、JIRA_TOKEN 必须自行填写外，其余配置可直接沿用这些默认值。
+# 技能目录与 CODEX_HOME 分离：技能由宿主机 skills/ 只读挂载，CODEX_HOME 只存放 Codex 运行期状态。
+DEFAULT_SKILLS_DIR = "/data/skills"
+DEFAULT_SKILL_WORKSPACE_DIR = "/data/skill-workspace"
+DEFAULT_SKILL_API_TOKEN = "local-dev-token"
+DEFAULT_SKILL_URL_ALLOWED_HOSTS = "jira.in.wezhuiyi.com"
+DEFAULT_CODEX_HOME = "/data/codex"
+DEFAULT_CODEX_MODEL = "codex/deepseek-flash"
+DEFAULT_CODEX_BASE_URL = "https://newapi.in.wezhuiyi.com/v1"
+
+
+def _env_or(name: str, default: str) -> str:
+    """读取环境变量，未配置或配置为空字符串时返回默认值，避免空值覆盖内置默认。"""
+    value = os.getenv(name)
+    return value if value else default
+
+
+def _resolve_codex_base_url():
+    """解析 Codex 使用的模型中转地址：优先 CODEX_BASE_URL，其次由 OPENAI_URL 补齐 /v1，最后用内置默认中转。"""
+    configured = os.getenv("CODEX_BASE_URL")
+    if configured:
+        return configured
+    fallback = os.getenv("OPENAI_URL", "")
+    if not fallback:
+        return DEFAULT_CODEX_BASE_URL
+    text = fallback.rstrip("/")
+    return text if text.endswith("/v1") else f"{text}/v1"
+
+
+def _resolve_codex_api_key():
+    """解析 Codex 使用的模型密钥，未显式配置时复用 OPENAI_KEY。"""
+    return os.getenv("CODEX_API_KEY") or os.getenv("OPENAI_KEY", "")
+
+
 class Config:
     """Config 类封装该领域对象的状态、依赖与相关行为。"""
     MAX_CONTENT_LENGTH = int(os.getenv("MAX_CONTENT_LENGTH", str(120 * 1024 * 1024)))
@@ -165,6 +201,32 @@ class Config:
     OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5.6-sol")
     OPENAI_API_STYLE = os.getenv("OPENAI_API_STYLE", "chat").lower()
     OPENAI_REASONING_EFFORT = os.getenv("OPENAI_REASONING_EFFORT", "high")
+
+    # 技能执行（Codex Agent）配置：技能目录、工作目录、外部调用令牌与 Codex 运行参数。
+    SKILLS_DIR = _env_or("SKILLS_DIR", DEFAULT_SKILLS_DIR)
+    SKILL_WORKSPACE_DIR = _env_or("SKILL_WORKSPACE_DIR", DEFAULT_SKILL_WORKSPACE_DIR)
+    # 外部调用令牌：默认值仅用于本地验证，生产环境必须替换为随机强令牌。
+    SKILL_API_TOKEN = _env_or("SKILL_API_TOKEN", DEFAULT_SKILL_API_TOKEN)
+    SKILL_API_TOKEN_PATHS = _env_or("SKILL_API_TOKEN_PATHS", "/skill")
+    SKILL_API_USERNAME = _env_or("SKILL_API_USERNAME", "external-api")
+    SKILL_URL_ALLOWED_HOSTS = _env_or("SKILL_URL_ALLOWED_HOSTS", DEFAULT_SKILL_URL_ALLOWED_HOSTS)
+    CODEX_BIN = _env_or("CODEX_BIN", "codex")
+    CODEX_HOME = _env_or("CODEX_HOME", DEFAULT_CODEX_HOME)
+    CODEX_MODEL = _env_or("CODEX_MODEL", DEFAULT_CODEX_MODEL)
+    CODEX_MODEL_PROVIDER = _env_or("CODEX_MODEL_PROVIDER", "skillrun")
+    CODEX_BASE_URL = _resolve_codex_base_url()
+    CODEX_API_KEY = _resolve_codex_api_key()
+    CODEX_API_KEY_ENV = _env_or("CODEX_API_KEY_ENV", "CODEX_SKILL_API_KEY")
+    CODEX_WIRE_API = _env_or("CODEX_WIRE_API", "responses")
+    CODEX_REASONING_EFFORT = _env_or("CODEX_REASONING_EFFORT", _env_or("OPENAI_REASONING_EFFORT", "high"))
+    CODEX_SANDBOX = _env_or("CODEX_SANDBOX", "danger-full-access")
+    CODEX_EPHEMERAL = _env_or("CODEX_EPHEMERAL", "true").lower() == "true"
+    CODEX_EXTRA_ARGS = os.getenv("CODEX_EXTRA_ARGS", "")
+    CODEX_SKILL_TIMEOUT = int(_env_or("CODEX_SKILL_TIMEOUT", "1800"))
+    # 连续多少次网络错误后提前判定模型/Jira 不可达，避免空转到超时。
+    CODEX_NETWORK_RETRY_LIMIT = int(_env_or("CODEX_NETWORK_RETRY_LIMIT", "10"))
+    # worker 启动时是否把上一次运行遗留的“执行中”任务标记为失败。
+    SKILL_RECOVER_ORPHANS = _env_or("SKILL_RECOVER_ORPHANS", "true").lower() == "true"
     LOG_ERROR_CONTEXT_LINES = int(os.getenv("LOG_ERROR_CONTEXT_LINES", "10"))
     LOG_CONTEXT_MAX_CHARS = int(os.getenv("LOG_CONTEXT_MAX_CHARS", "30000"))
     

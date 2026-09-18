@@ -12,6 +12,7 @@
 - 用户由管理员维护 `users.csv`，应用热加载新增、禁用和立即下线状态。
 - 除登录和账号申请外，服务接口必须携带有效登录令牌。
 - 用户操作写入数据库审计表，便于按操作人和请求编号追踪。
+- 内置 Codex Agent 技能执行接口：提交 Jira 链接与 `skill_id`，由服务端跑技能完成需求准入检查并写回 Jira 评论。
 - Docker Compose 提供数据库迁移、API、Worker、前端和 OCR 运行环境，并可通过 `local-deps` Profile 启动本地 MySQL、Redis。
 
 ## 服务架构
@@ -20,7 +21,7 @@
 | --- | --- | --- |
 | `frontend` | Nginx 静态页面和 `/api` 反向代理 | `8080` |
 | `api` | Flask API、认证、上传、Git 和分析任务提交 | `5000` |
-| `worker` | Celery 异步深度分析和 OCR 任务 | 无宿主机端口 |
+| `worker` | Celery 异步深度分析、OCR 与技能（Codex Agent）执行 | 无宿主机端口 |
 | `migrate` | 创建数据库并执行 `flask db upgrade` | 一次性容器 |
 | `mysql` | 业务数据、知识库和用户操作日志 | `3306` |
 | `redis` | 登录会话、限流状态、Celery Broker 和结果存储 | `6379` |
@@ -250,7 +251,7 @@ powershell -ExecutionPolicy Bypass -File scripts\package_production_deploy.ps1 -
 
 ### 生产服务器更新
 
-生产服务器首次部署时，把 `.env.production.example` 复制为 `.env.production`，把 `users.example.csv` 复制为 `users.csv`，填写真实配置后执行：
+生产服务器首次部署时，把 `.env.production.example` 复制为 `.env.production`，把 `users.example.csv` 复制为 `config/users.csv`（该目录对应容器内 `/data/`，即 `AUTH_USERS_FILE=/data/users.csv`），填写真实配置后执行：
 
 ```bash
 docker compose --env-file .env.production -f docker-compose.prod.yml pull
@@ -277,6 +278,147 @@ powershell -ExecutionPolicy Bypass -File scripts\export_release_image.ps1 `
 ```
 
 把生成的 `.tar` 和 `.sha256` 文件传到生产服务器，核验后执行 `docker load -i <镜像文件.tar>`，再运行对应的 `up -d` 命令即可。完整操作见 `deploy/README.md`。
+
+## 技能执行接口（Codex Agent）
+
+系统内置技能执行能力：外部系统提交一个 Jira 链接与 `skill_id`，服务端在独立工作目录中启动 Codex CLI，
+加载 `skills/<skill_id>/SKILL.md`，由 Agent 按技能定义访问 Jira、执行检查并写回评论。当前内置技能为
+`jira-gate-1`（Jira 需求准入检查 G1，产出难度分级与达标结论，并把逐项打标记的检查项清单写入需求单评论）。
+
+### 接口一览
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| `GET` | `/skill/list` | 列出技能目录中的可用技能 |
+| `POST` | `/skill/run` | 提交技能任务，异步执行并立即返回 `task_id` |
+| `GET` | `/skill/task/<task_id>` | 查询任务状态、阶段进度与最终结论 |
+| `GET` | `/skill/tasks` | 最近任务列表，支持 `limit`、`skill_id`、`status` |
+| `POST` | `/skill/task/<task_id>/cancel` | 取消排队或执行中的任务 |
+
+提交任务（外部系统建议使用独立令牌 `X-API-Token`，避免共享登录会话）：
+
+```bash
+curl -X POST http://127.0.0.1:5000/skill/run \
+  -H "X-API-Token: <SKILL_API_TOKEN>" \
+  -H "Content-Type: application/json" \
+  -d '{
+        "skill_id": "jira-gate-1",
+        "jira_url": "https://jira.in.wezhuiyi.com/browse/CALL-1446",
+        "inputs": {}
+      }'
+```
+
+返回 `202`：
+
+```json
+{"task_id":"SKL-8F3C1D2E4A5B6071","record_id":12,"skill_id":"jira-gate-1","status":"queued","status_url":"/skill/task/SKL-8F3C1D2E4A5B6071"}
+```
+
+查询结果，`status` 取值 `queued`、`running`、`succeeded`、`failed`、`timeout`、`cancelled`：
+
+```bash
+curl -H "X-API-Token: <SKILL_API_TOKEN>" http://127.0.0.1:5000/skill/task/SKL-8F3C1D2E4A5B6071
+```
+
+登录用户也可以直接用 `Authorization: Bearer <登录令牌>` 调用同一组接口。任务与进度同时写入数据库表
+`skill_run_records`，可通过 `GET /skill/tasks` 追踪。
+
+### 技能目录
+
+技能放在项目根 `skills/` 目录，容器内**只读**挂载到 `/data/skills`，与 Codex 运行目录（`CODEX_HOME`）分开存放。新增技能只需建立 `skills/<skill_id>/SKILL.md`，
+可选 `runtime.json` 覆盖提示词模板、超时时间与必填输入，详见 `skills/README.md`。
+
+### 技能配置
+
+除 `CODEX_API_KEY`、`JIRA_TOKEN` 两项密钥外，其余技能配置均已内置已验证可用的默认值，部署时无需在 `.env` 中重复填写。
+
+| 变量 | 默认值 | 说明 |
+| --- | --- | --- |
+| `SKILL_API_TOKEN` | `local-dev-token` | 外部系统调用 `/skill` 接口的独立令牌；默认值仅供本地验证，生产环境必须替换为随机强令牌 |
+| `SKILL_URL_ALLOWED_HOSTS` | `jira.in.wezhuiyi.com` | `jira_url` 主机白名单，逗号分隔；留空表示不限制 |
+| `SKILL_WORKSPACE_DIR` | `/data/skill-workspace` | 技能工作目录 |
+| `CODEX_SKILL_TIMEOUT` | `1800` | 单次技能执行超时秒数 |
+| `CODEX_MODEL` | `codex/deepseek-flash` | Codex 使用的模型 |
+| `CODEX_MODEL_PROVIDER` | `skillrun` | 模型提供方标识，后端以 `-c model_provider=...` 传给 Codex |
+| `CODEX_BASE_URL` | `https://newapi.in.wezhuiyi.com/v1` | 模型中转地址；未配置时回退 `OPENAI_URL` |
+| `CODEX_API_KEY` | 无（**必填**） | 模型中转令牌；未配置时回退 `OPENAI_KEY` |
+| `CODEX_WIRE_API`、`CODEX_REASONING_EFFORT` | `responses`、`high` | Codex 请求协议与推理强度 |
+| `CODEX_SANDBOX` | `danger-full-access` | Codex 子进程沙箱模式，隔离边界由容器提供 |
+| `CODEX_NETWORK_RETRY_LIMIT` | `10` | 连续网络错误达到该次数即判定模型/Jira 不可达并提前终止，不再空转到超时 |
+| `SKILL_RECOVER_ORPHANS` | `true` | worker 启动时把上一次运行遗留的 `running` 任务标记为失败 |
+| `CODEX_HOME` | `/data/codex` | Codex 运行目录，挂载 `codex-home` 命名卷，只存放 Codex 运行期状态（`state_*.sqlite` 等） |
+| `SKILLS_DIR` | `/data/skills` | 技能目录，容器内由 `./skills` 只读挂载而来，Codex 运行时不会改写它 |
+| `JIRA_TOKEN` | 无（**必填**） | 注入给技能脚本的 Jira 个人访问令牌；也可把令牌文件放到 `skills/.jira-token` |
+| `JIRA_BASE_URL` | `https://jira.in.wezhuiyi.com` | 注入给技能脚本的 Jira 站点地址 |
+
+技能运行参数由后端以 `codex exec -c ...` 传入（模型、中转地址、请求协议、推理强度等），容器内无需维护 `config.toml`；
+需要附加 Codex 配置时用 `CODEX_EXTRA_ARGS` 追加，例如 `CODEX_EXTRA_ARGS=-c model_context_window=128000`。
+Codex 自己生成的状态文件全部落在 `codex-home` 卷（本地运行对应 `backend/local-data/codex-home`），不会写进仓库目录。
+令牌统一走环境变量，不要写进配置文件或提交到仓库。
+
+### 部署要点
+
+- 后端镜像已内置 Node.js 与 Codex CLI，构建参数为 `CODEX_CLI_VERSION` 与 `NPM_REGISTRY`。
+- `docker compose up -d --build` 会自动挂载 `./skills:/data/skills:ro`，并创建 `codex-home`、`skill-workspace` 等命名卷。
+- 首次部署后自检技能运行环境：
+
+```bash
+docker compose exec worker node /data/skills/jira-gate-1/scripts/jira-cli.mjs selftest
+```
+
+- API 只负责提交任务，Codex 实际执行发生在 `worker` 容器，请确保 `worker` 能访问 Jira 与模型中转。
+- 技能任务与日志分析共享 `worker` 并发槽位，单次技能可能运行数分钟；并发要求高时可单独部署一个监听同一队列的 Worker，或调整 `CELERY_WORKER_CONCURRENCY`。
+- 技能工作目录保留在 `skill-workspace` 卷中便于排查，长期运行请按需清理。
+
+### 本地验证（不使用 Docker）
+
+本地直连 MySQL 与 Redis 即可跑通整条技能链路，表结构与生产使用同一套迁移。步骤：
+
+1. 安装后端依赖并复制配置模板：
+
+```powershell
+python -m venv backend\.venv-win
+backend\.venv-win\Scripts\python.exe -m pip install -r backend\requirements-windows.txt
+Copy-Item .env.example backend\.env
+```
+
+2. 填写 `backend/.env`：
+
+- 数据库与 Redis：`MYSQL_HOST`、`MYSQL_PORT`、`MYSQL_DATABASE`、`MYSQL_USERNAME`、`MYSQL_PASSWORD` 指向可用的 MySQL 实例；`REDIS_HOST`、`REDIS_PORT` 指向可用的 Redis。应用默认按这组参数拼装 `SQLALCHEMY_DATABASE_URI`，无需手写连接串。
+- 必填密钥：`JIRA_TOKEN`、`CODEX_API_KEY`。其余技能配置（含 `CODEX_MODEL`、`CODEX_BASE_URL`、`SKILL_API_TOKEN`、`JIRA_BASE_URL`）均已内置可用默认值。
+- 本地路径：把 `LOCAL_STORAGE_DIR`、`LOG_DIR` 改成本机可写目录，不要沿用容器内的 `/data/...` 路径。
+
+3. 建表（与生产同一套迁移）：
+
+```powershell
+cd backend
+.\.venv-win\Scripts\python.exe init_database.py
+.\.venv-win\Scripts\python.exe -m flask --app app.py db upgrade
+```
+
+4. 启动 Worker 与 API（两个终端分别执行，均在 `backend` 目录下）：
+
+```powershell
+.\.venv-win\Scripts\python.exe -m celery -A celery_worker.celery_app worker --loglevel=INFO --concurrency=1 --pool=solo
+.\.venv-win\Scripts\python.exe -m flask --app app.py run --no-reload --port 5000
+```
+
+Windows 上 Celery 必须使用 `--pool=solo`；`--no-reload` 用于避免 Flask 重载子进程残留占用 `5000` 端口。
+
+5. 自检与调用（`SKILL_API_TOKEN` 即 `backend/.env` 中配置的令牌）：
+
+```powershell
+node ..\skills\jira-gate-1\scripts\jira-cli.mjs selftest
+curl -H "X-API-Token: local-dev-token" http://127.0.0.1:5000/health/ready
+curl -H "X-API-Token: local-dev-token" http://127.0.0.1:5000/skill/list
+```
+
+**验证注意事项**
+
+- `jira-gate-1` 在达标与不达标两种情况下都会**真实写入 Jira 评论**（内容是逐项打标记的检查项清单）。本地验证请使用测试单或临时项目单，不要拿正式需求单试跑。
+- 想先验证链路而不碰 Jira，可临时新建一个只回复结论的测试技能目录，并把 `SKILLS_DIR` 指向该目录。
+- 本地 `node` 版本需与容器内一致（默认 `0.142.5`）；用 `codex --version` 确认，必要时通过 `CODEX_BIN` 指定完整路径。
+- 首次运行会在 `CODEX_HOME` 内生成 Codex CLI 自身的状态文件（`state_*.sqlite` 等，与业务数据库无关），并保留技能工作目录，均属预期行为。本地默认指向 `backend/local-data/codex-home`，容器内落在 `codex-home` 卷，都不会污染仓库目录。
 
 ## Git 与外部基础设施
 
@@ -408,4 +550,29 @@ docker compose exec api python verify_runtime.py --ocr
 ### 前端可打开但功能不可用
 
 这是未登录状态的预期行为。先登录，再检查浏览器请求是否携带 `Authorization: Bearer ...`，并查看 `/health/ready` 与 API 日志。
+
+### 技能任务一直处于 running 或返回失败
+
+技能执行发生在 `worker` 容器，按顺序排查：
+
+```bash
+# 1. 查看 Codex 执行过程与错误输出
+docker compose logs -f worker
+# 2. 技能运行环境自检（令牌、连通性、账号）
+docker compose exec worker node /data/skills/jira-gate-1/scripts/jira-cli.mjs selftest
+# 3. 确认镜像内 Codex CLI 可用
+docker compose exec worker codex --version
+```
+
+常见原因：`worker` 无法访问 Jira 或模型中转地址；`JIRA_TOKEN` 未配置或已过期；
+`CODEX_WIRE_API` 与中转服务的接口协议不匹配（`responses` 对应 `/v1/responses`，`chat` 对应 `/v1/chat/completions`）。
+任务的阶段、最近事件与错误信息可通过 `GET /skill/task/<task_id>` 或 `skill_run_records` 表查看。
+
+两类问题会自动识别，无需等满 `CODEX_SKILL_TIMEOUT`：
+
+- **网络不可达**：Codex 反复输出 `Reconnecting... waiting for network` 时，连续达到 `CODEX_NETWORK_RETRY_LIMIT`
+  （默认 10 次，按指数退避约 15 分钟）即提前终止，任务记为 `failed`，`stage=network_unreachable`，错误信息给出中转地址、
+  出网与代理的排查方向。若该任务是从沙箱或离线环境启动的进程提交的，请改用正常网络环境重启 `worker`。
+- **worker 重启遗留**：`worker` 启动时若 `SKILL_RECOVER_ORPHANS=true`（默认），会把上一次运行中残留的
+  `running` 任务标记为 `failed`，`stage=worker_restarted`；仍被其它 worker 正常执行的任务不会被误改。
 

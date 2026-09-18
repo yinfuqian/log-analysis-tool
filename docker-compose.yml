@@ -4,6 +4,9 @@ x-backend-build: &backend-build
   dockerfile: Dockerfile
   args:
     PYTHON_BASE_IMAGE: ${PYTHON_BASE_IMAGE:-docker.m.daocloud.io/library/python:3.10-slim-bookworm}
+    NODE_BASE_IMAGE: ${NODE_BASE_IMAGE:-docker.m.daocloud.io/library/node:20-bookworm-slim}
+    CODEX_CLI_VERSION: ${CODEX_CLI_VERSION:-0.142.5}
+    NPM_REGISTRY: ${NPM_REGISTRY:-https://registry.npmmirror.com}
     APT_MIRROR: ${APT_MIRROR:-https://mirrors.aliyun.com/debian}
     PIP_INDEX_URL: ${PIP_INDEX_URL:-https://pypi.tuna.tsinghua.edu.cn/simple}
 
@@ -23,10 +26,40 @@ x-backend-environment: &backend-environment
   REDIS_PASSWORD: ${REDIS_PASSWORD:-change-me}
   PADDLE_PDX_CACHE_HOME: /data/paddle-cache
   REPO_CACHE_DIR: /tmp/fault-analyzer-repos
+  # 技能执行（Codex Agent）相关配置。CODEX_BASE_URL/CODEX_API_KEY 为空时回退到 OPENAI_URL/OPENAI_KEY。
+  # 技能目录与 CODEX_HOME 分离：技能由宿主机 ./skills 只读挂载，CODEX_HOME 用独立卷存放运行期状态。
+  SKILLS_DIR: ${SKILLS_DIR:-/data/skills}
+  SKILL_WORKSPACE_DIR: /data/skill-workspace
+  CODEX_HOME: /data/codex
+  # 外部调用令牌：默认值仅用于本地验证，生产环境请在 .env 中替换为随机强令牌。
+  SKILL_API_TOKEN: ${SKILL_API_TOKEN:-local-dev-token}
+  SKILL_URL_ALLOWED_HOSTS: ${SKILL_URL_ALLOWED_HOSTS:-jira.in.wezhuiyi.com}
+  CODEX_BIN: ${CODEX_BIN:-codex}
+  CODEX_MODEL: ${CODEX_MODEL:-codex/deepseek-flash}
+  CODEX_MODEL_PROVIDER: ${CODEX_MODEL_PROVIDER:-skillrun}
+  CODEX_BASE_URL: ${CODEX_BASE_URL:-https://newapi.in.wezhuiyi.com/v1}
+  CODEX_API_KEY: ${CODEX_API_KEY:-}
+  CODEX_API_KEY_ENV: ${CODEX_API_KEY_ENV:-CODEX_SKILL_API_KEY}
+  CODEX_WIRE_API: ${CODEX_WIRE_API:-responses}
+  CODEX_REASONING_EFFORT: ${CODEX_REASONING_EFFORT:-high}
+  CODEX_SANDBOX: ${CODEX_SANDBOX:-danger-full-access}
+  CODEX_EPHEMERAL: ${CODEX_EPHEMERAL:-true}
+  CODEX_SKILL_TIMEOUT: ${CODEX_SKILL_TIMEOUT:-1800}
+  # 连续网络错误达到该次数即判定模型/Jira 不可达并提前终止，避免空转到超时。
+  CODEX_NETWORK_RETRY_LIMIT: ${CODEX_NETWORK_RETRY_LIMIT:-10}
+  # worker 启动时把上一次运行遗留的“执行中”任务标记为失败。
+  SKILL_RECOVER_ORPHANS: ${SKILL_RECOVER_ORPHANS:-true}
+  JIRA_TOKEN: ${JIRA_TOKEN:-}
+  JIRA_BASE_URL: ${JIRA_BASE_URL:-https://jira.in.wezhuiyi.com}
 
 x-backend-volumes: &backend-volumes
   - uploads:/data/upload
   - ./config:/data/
+  # 技能目录只读挂载：Codex 运行时无法改动技能定义，也不会把内置技能写进业务技能目录。
+  - ./skills:/data/skills:ro
+  # CODEX_HOME 独立命名卷：Codex 状态库（state/logs/goals 等）落在卷内，不污染仓库目录。
+  - codex-home:/data/codex
+  - skill-workspace:/data/skill-workspace
   - runtime-logs:/app/app/logs
   - repo-cache:/tmp/fault-analyzer-repos
   - ocr-models:/data/paddle-cache
@@ -180,3 +213,5 @@ volumes:
   uploads:
   runtime-logs:
   repo-cache:
+  skill-workspace:
+  codex-home:

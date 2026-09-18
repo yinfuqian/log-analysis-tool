@@ -26,6 +26,7 @@ __pycache__/
 logs/
 data/
 backend/app/logs/
+backend/local-data/
 
 # Docker/build artifacts
 build/
@@ -66,3 +67,11 @@ release/
 
 # Codex isolated implementation worktrees
 .worktreess/
+
+# 技能运行期令牌与工作目录，禁止提交
+skills/.jira-token
+skills/.jira-token.txt
+skills/jira-token.txt
+skills/**/.jira-token
+skills/**/.jira-token.txt
+skill-workspace/

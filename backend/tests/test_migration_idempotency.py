@@ -78,6 +78,51 @@ class MigrationIdempotencyTests(unittest.TestCase):
 
         self.assertIn("create table if not exists user_operation_logs", ddl)
 
+    def test_skill_run_records_upgrade_preserves_an_existing_table(self):
+        migration = load_migration("d4c8b1e6a927_skill_run_records.py")
+        inspector = FakeInspector(
+            tables={"skill_run_records"},
+            indexes={
+                "skill_run_records": {
+                    "ix_skill_run_records_task_id",
+                    "ix_skill_run_records_skill_id",
+                    "ix_skill_run_records_status",
+                    "ix_skill_run_records_requested_by",
+                    "ix_skill_run_records_created_at",
+                }
+            },
+        )
+
+        with patch.object(migration.op, "get_bind", return_value=object()), \
+                patch.object(migration.sa, "inspect", return_value=inspector), \
+                patch.object(migration.op, "create_table") as create_table, \
+                patch.object(migration.op, "create_index") as create_index:
+            migration.upgrade()
+
+        create_table.assert_not_called()
+        create_index.assert_not_called()
+
+    def test_skill_run_records_upgrade_creates_unique_task_index(self):
+        migration = load_migration("d4c8b1e6a927_skill_run_records.py")
+        inspector = FakeInspector(tables=set(), indexes={})
+
+        with patch.object(migration.op, "get_bind", return_value=object()), \
+                patch.object(migration.sa, "inspect", return_value=inspector), \
+                patch.object(migration.op, "create_table"), \
+                patch.object(migration.op, "create_index") as create_index:
+            migration.upgrade()
+
+        unique_indexes = [
+            call for call in create_index.call_args_list if call.kwargs.get("unique")
+        ]
+        self.assertEqual(len(unique_indexes), 1)
+        self.assertEqual(unique_indexes[0].args[0], "ix_skill_run_records_task_id")
+
+    def test_bootstrap_schema_contains_skill_run_records_before_stamping_head(self):
+        ddl = "\n".join(bootstrap_schema.DDL_STATEMENTS).lower()
+
+        self.assertIn("create table if not exists skill_run_records", ddl)
+
 
 if __name__ == "__main__":
     unittest.main()

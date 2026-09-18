@@ -10,8 +10,9 @@ MySQL 和 Redis 必须在 `.env.production` 中填写宿主机可访问的真实
 
 1. 将 `docker-compose.prod.yml`、`.env.production.example`、`users.example.csv` 和本说明放在同一目录。
 2. 将 `.env.production.example` 复制为 `.env.production`，填写镜像地址、MySQL、Redis、模型和第三方接口配置。
-3. 将 `users.example.csv` 复制为 `users.csv`，修改默认密码并由管理员持续维护。
-4. 登录镜像仓库后拉取并启动：
+3. 将 `users.example.csv` 复制为 `config/users.csv`（`./config` 挂载到容器 `/data/`，即容器内 `/data/users.csv`），修改默认密码并由管理员持续维护。
+4. 如需使用技能执行接口（`/skill`），把 `skills/` 目录上传到与 Compose 文件同级的位置（容器只读挂载为 `/data/skills`），技能所需的模型参数在 `.env.production` 中配置。
+5. 登录镜像仓库后拉取并启动：
 
 ```bash
 docker compose --env-file .env.production -f docker-compose.prod.yml pull
@@ -64,6 +65,48 @@ docker load -i fault-analysis-backend-2026.07.18-1.tar
 ## 回滚
 
 将 `.env.production` 中的镜像标签恢复为上一个已验证版本，再执行对应组件的 `up -d`。不要使用 `latest`，否则无法可靠确认当前版本和回滚目标。
+
+## 技能执行（/skill 接口）
+
+技能功能需要两项额外条件，未配置时不影响其余业务功能：
+
+1. 后端镜像需为包含 Codex CLI 的版本（`docker compose ... pull` 拉取最新镜像即可）。
+2. 将本包的 `skills/` 目录上传到 Compose 文件同级目录，容器会把它**只读**挂载到 `/data/skills`；目录缺失时 `/skill/list` 返回空列表。
+
+技能运行参数（模型、中转地址、请求协议、推理强度）由后端以 `codex exec -c ...` 传入，容器内不需要维护 `config.toml`；
+Codex 自身的状态库（`state_*.sqlite` 等）写在 `codex-home` 命名卷中，不会落到宿主机目录。需要附加 Codex 配置时用
+`CODEX_EXTRA_ARGS` 追加，例如 `CODEX_EXTRA_ARGS=-c model_context_window=128000`。
+
+`.env.production` 中除下面两项密钥外，其余技能配置均已内置默认值，可不再改动：
+
+```env
+# 【必填】技能使用的 Jira 个人访问令牌
+JIRA_TOKEN=请填写
+# 【必填】Codex 使用的模型中转令牌
+CODEX_API_KEY=请填写
+```
+
+需要按环境调整或加固时，再确认这几项（默认值已可直接使用）：
+
+```env
+# 外部系统调用 /skill 接口的独立令牌；默认值为本地验证令牌，生产环境必须替换为随机强令牌
+SKILL_API_TOKEN=local-dev-token
+# jira_url 允许的主机白名单
+SKILL_URL_ALLOWED_HOSTS=jira.in.wezhuiyi.com
+# 技能使用的 Jira 站点地址
+JIRA_BASE_URL=https://jira.in.wezhuiyi.com
+# Codex 使用的模型与中转地址
+CODEX_MODEL=codex/deepseek-flash
+CODEX_BASE_URL=https://newapi.in.wezhuiyi.com/v1
+```
+
+部署后自检：
+
+```bash
+docker compose --env-file .env.production -f docker-compose.prod.yml exec worker \
+  node /data/skills/jira-gate-1/scripts/jira-cli.mjs selftest
+curl -H "X-API-Token: <SKILL_API_TOKEN>" http://127.0.0.1:5000/skill/list
+```
 
 ## 安全边界
 
