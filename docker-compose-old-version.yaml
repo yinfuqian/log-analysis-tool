@@ -45,6 +45,7 @@ services:
     ports:
       - "${API_PORT}:5000"
     volumes:
+      - ./data/users.csv:/users.csv
       - ./data/upload:/data/upload
       - ./data/logs:/app/app/logs
       - ./data/repos:/tmp/log-analyzer-repos
