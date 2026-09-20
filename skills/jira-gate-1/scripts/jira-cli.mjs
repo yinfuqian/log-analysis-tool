@@ -19,6 +19,7 @@
  *   node scripts/jira-cli.mjs flow-owner <KEY|URL>           # 输出流转人与其 @ 写法
  *   node scripts/jira-cli.mjs transition <KEY|URL> --to <目标状态>
  *   node scripts/jira-cli.mjs attach <KEY|URL> <本地文件> [--name <附件名>]
+ *   node scripts/jira-cli.mjs attach-list <KEY|URL>          # 读回该单现有附件，用于上传后确认
  *
  * 令牌来源：--token 参数、JIRA_TOKEN 环境变量，或 jira.mjs 默认查找的令牌文件。
  */
@@ -47,7 +48,8 @@ const USAGE = `用法：
   node scripts/jira-cli.mjs transitions <KEY|URL>
   node scripts/jira-cli.mjs flow-owner <KEY|URL>
   node scripts/jira-cli.mjs transition <KEY|URL> --to <目标状态>
-  node scripts/jira-cli.mjs attach <KEY|URL> <本地文件> [--name <附件名>]`;
+  node scripts/jira-cli.mjs attach <KEY|URL> <本地文件> [--name <附件名>]
+  node scripts/jira-cli.mjs attach-list <KEY|URL>`;
 
 
 /**
@@ -240,7 +242,23 @@ async function main() {
       requireArgs(positional, 2, "attach <KEY|URL> <本地文件> [--name <附件名>]");
       const upload = { ...callOptions };
       if (options.name) upload.name = options.name;
-      console.log(JSON.stringify(await jira.uploadAttachment(positional[0], positional[1], upload), null, 2));
+      const uploaded = await jira.uploadAttachment(positional[0], positional[1], upload);
+      console.log(JSON.stringify(uploaded, null, 2));
+      // 上传失败时用退出码 1 + stderr 告警暴露，避免只看退出码就当成上传成功。
+      if (!uploaded.ok) {
+        console.error(
+          `[附件上传失败] reason=${uploaded.reason}` +
+            (uploaded.status ? ` status=${uploaded.status}` : "") +
+            ` 文件=${uploaded.name || uploaded.file || positional[1]}`,
+        );
+        process.exitCode = 1;
+      }
+      return;
+    }
+    case "attach-list": {
+      requireArgs(positional, 1, "attach-list <KEY|URL>");
+      const attachmentsIssue = await jira.getIssue(positional[0], callOptions);
+      console.log(JSON.stringify(attachmentsIssue.attachments, null, 2));
       return;
     }
     default:

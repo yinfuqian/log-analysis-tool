@@ -87,6 +87,44 @@ class ReportAttachmentContractTests(unittest.TestCase):
         self.assertIn("CREATE_ATTACHMENTS", text)
         self.assertIn("## 10. 评审报告附件上传", text)
 
+    def test_attach_failure_is_visible_via_exit_code(self):
+        """上传失败必须置退出码 1 并在 stderr 告警，避免只看 exit code 就当成成功。"""
+        cli_source = (GATE_SKILL_DIR / "scripts" / "jira-cli.mjs").read_text(encoding="utf-8")
+
+        self.assertIn("process.exitCode = 1", cli_source)
+        self.assertIn("[附件上传失败]", cli_source)
+        self.assertIn('case "attach-list"', cli_source)
+
+    def test_skill_requires_readback_after_upload(self):
+        """SKILL.md 必须要求上传后读回确认，成功判定不看退出码。"""
+        text = (GATE_SKILL_DIR / "SKILL.md").read_text(encoding="utf-8")
+
+        self.assertIn("上传后必须读回确认", text)
+        self.assertIn("attach-list", text)
+        self.assertIn("不要把失败说成成功", text)
+
+    def test_execution_order_puts_transition_last(self):
+        """执行顺序固定为 评论 → 门禁字段 → 附件 → 流转，流转必须是最后一个动作。"""
+        skill_text = (GATE_SKILL_DIR / "SKILL.md").read_text(encoding="utf-8")
+        doc_text = (GATE_SKILL_DIR / "references" / "jira-api.md").read_text(encoding="utf-8")
+
+        skill_order = "写评论（含 @）→ 回写门禁字段 → 上传附件 → 流转状态"
+        doc_order = "评论（含 @）→ 门禁字段 → 附件 → 流转"
+        self.assertIn(skill_order, skill_text)
+        self.assertIn(doc_order, doc_text)
+        # 旧顺序（附件在流转之后）不得残留。
+        self.assertNotIn("流转状态（仅不达标）→ 上传附件", skill_text)
+        self.assertNotIn("流转状态（仅不达标）→ 上传附件", doc_text)
+
+    def test_comment_template_ends_with_attachment_line(self):
+        """评论末尾必须固定带一行「报告附件」，达标与不达标都要有。"""
+        skill_text = (GATE_SKILL_DIR / "SKILL.md").read_text(encoding="utf-8")
+        doc_text = (GATE_SKILL_DIR / "references" / "jira-api.md").read_text(encoding="utf-8")
+
+        self.assertIn("* 报告附件：{{<KEY>-需求评审报告-宋立志.md}}", skill_text)
+        self.assertIn("评论末尾固定的一行，达标与不达标都要有", skill_text)
+        self.assertIn("报告附件：<KEY>-需求评审报告-宋立志.md（已上传）", doc_text)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -16,7 +16,7 @@ class SkillJiraGateFlowTests(unittest.TestCase):
         """SKILL.md 必须写明只在结论不达标时流转，达标不做任何状态变更。"""
         text = SKILL_PATH.read_text(encoding="utf-8")
 
-        self.assertIn("### 9. 不达标时流转状态并 @ 流转人", text)
+        self.assertIn("### 9. 交付顺序与「不达标时流转状态并 @ 流转人」", text)
         self.assertIn("不做任何状态变更", text)
         self.assertIn("评审中", text)
         # 旧口径「一律不流转状态」必须已被替换，否则与本次需求冲突。

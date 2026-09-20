@@ -117,6 +117,7 @@ nodeRepl.write(["ADD_COMMENTS", "EDIT_ISSUES", "TRANSITION_ISSUES"].map(n => `${
 - 评论模板与 Jira wiki 标记对照见 `SKILL.md`「输出模板」节；**评论正文用 Jira wiki 标记，不要提交 Markdown 表格**，否则会显示成原始符号。
 - 评论只列检查点：一行难度结论 + 检查项清单；每项行首必须有标记——通过写 `(/)`（绿勾），不通过写 `(x)`（红叉）。不通过项每条一行、80 字以内；判定过程与难度维度留在对话回复里。
 - 不达标时元信息区多一行「待处理人」：`* 待处理人：[~登录名]｜流转：<实际流转结果>`，`@` 写法见 §9。
+- 评论**末尾固定一行**「报告附件」：`* 报告附件：<KEY>-需求评审报告-宋立志.md（已上传）`，与检查项清单之间空一行；达标与不达标都要有（见 §10 第 8 条）。
 - 写入后读回验证，确认渲染正常、无截断：
 
 ```javascript
@@ -130,9 +131,9 @@ nodeRepl.write(last.id + " | " + last.author + " | " + last.body.slice(0, 120));
 - 评论正文中避免出现未转义的花括号组合（`{color}` 之类会被当作宏）。
 - 结论只以评论留痕，不生成报告文档；本地仅保留附件与解析中间文件。
 
-## 9. 不达标时的流转与 @ 流转人
+## 9. 交付顺序与「不达标时的流转与 @ 流转人」
 
-仅在 AI 预检结论为**不达标**时执行；结论达标时不动状态、也不 @ 人。
+第 6 条的交付顺序对所有结论都适用（评论 → 门禁字段 → 附件 → 流转）；其余条目描述的流转动作**仅在 AI 预检结论为不达标时执行**，结论达标时不动状态、也不 @ 人。
 
 1. **流转人从哪来**：本站在 `/rest/api/2/field` 里没有名为「流转人」的字段（实测名字含「流转」的字段为 0 个），因此本技能已确认的口径是**取经办人 `assignee`**；仅在经办人为空时才按 `assignee → reporter → creator` 回退，回退取到时对话摘要里要写明实际来源（`resolveFlowOwner()` 返回的 `source` 字段会标明）。需要长期换口径时在技能目录的 `jira-config.json`（即仓库 `skills/jira-gate-1/jira-config.json`，随技能目录挂载进容器）里用 `flowOwnerField` 指定人员字段名，**不要改脚本**。
 2. **@ 写法**：Jira Server / DC 按登录名引用，`[~liu.huan]` 渲染为「刘欢」。`resolveFlowOwner()` 直接返回拼好的 `mention`；实测 `flow-owner ZYSQ-95` → `{"name":"liu.huan","displayName":"刘欢","mention":"[~liu.huan]","field":"assignee"}`。
@@ -146,7 +147,8 @@ node scripts/jira-cli.mjs transition <KEY|URL> --to 评审中   # 执行流转
 
 4. **匹配不到流转时不抛错**：返回 `{ok:false, reason:"no-transition", status, target, available}`，`available` 是当前可用流转列表。实测 `CALL-1446` 只有 `To Do→待办`、`初步处理→完成`、`跟进需求→需求澄清` 三条，**没有「评审中」**——这类单子按 `SKILL.md` §9 记「未流转（该单当前状态无「评审中」流转）」，并在对话里列出 `available` 交人工处理，不要改用其他状态。
 5. 已在目标状态时返回 `{ok:true, skipped:true, reason:"already-in-target"}`，不重复发起流转。
-6. 写评论、回写门禁字段、流转的顺序固定为：**评论（含 @）→ 门禁字段 → 流转**，流转放最后。
+6. 写评论、回写门禁字段、上传附件、流转的顺序固定为：**评论（含 @）→ 门禁字段 → 附件 → 流转**，流转放最后（见 §10）。前三步对所有结论都执行，只有流转那一步仅在结论为「不达标」时做。
+7. 因为是评论先写、流转后做，评论里的「流转：」先按预期结果写；流转跑完必须核对返回值，任一非成功分支都用 `comment-update` 改成实际措辞（措辞见 `SKILL.md` §9 的表）。
 
 ## 10. 评审报告附件上传
 
@@ -166,10 +168,13 @@ export JIRA_BASE_URL="${JIRA_BASE_URL:-https://jira.in.wezhuiyi.com}"
 
 ```bash
 node scripts/jira-cli.mjs attach <KEY|URL> "<报告路径>" --name "<KEY>-需求评审报告-宋立志.md"
+node scripts/jira-cli.mjs attach-list <KEY|URL>   # 读回确认：列表里出现目标文件名才算上传成功
 ```
 
-5. **降级**：本地文件缺失、403（缺 `CREATE_ATTACHMENTS`）、404（该单未启用附件）、网络错误都返回 `{ok:false, reason}` 而不抛错：**跳过上传并如实说明，不要重试、不要改文件名绕开**。
-6. **顺序**：评论 → 门禁字段 → 流转状态（仅不达标）→ 上传附件。附件放最后，前序步骤的留痕不因附件失败而回滚。
+5. **成功判定看返回体不看退出码**：`attach` 成功返回 `{ok:true, id, filename, size}`；失败返回 `{ok:false, reason}` 并**置退出码 1** 且在 stderr 打 `[附件上传失败] ...`。上传完后**必须**用 `attach-list` 读回，确认 `fields.attachment` 里出现目标文件名——`ok:true` 只说明站点接受了这次 POST，读回才是"附件真的挂在该单上"的证据。注意附件的 `author` 是令牌账号，不是写评论的人，这一点不是异常。
+6. **降级**：本地文件缺失、403（缺 `CREATE_ATTACHMENTS`）、404（该单未启用附件）、网络错误都返回 `{ok:false, reason}` 而不抛错：**跳过上传并如实说明，不要重试、不要改文件名绕开**。
+7. **顺序**：评论 → 门禁字段 → 上传附件 → 流转状态（仅不达标，见 §9）。流转放最后，前序步骤的留痕不因流转失败而回滚。
+8. **评论末尾固定带附件行**：评论里写 `* 报告附件：<KEY>-需求评审报告-宋立志.md（已上传 / 未上传（原因））`。附件名按第 3 条规则可提前确定，所以评论先写名字、上传后核对；上传失败时用 `comment-update` 改成「未上传（原因）」，不要留一个指向不存在附件的名字。
 
 ## 11. 故障排查
 
@@ -189,6 +194,8 @@ node scripts/jira-cli.mjs attach <KEY|URL> "<报告路径>" --name "<KEY>-需求
 | 上传返回 `reason:"not-found"` | 该单未启用附件或单号不对；如实说明 |
 | 上传返回 `reason:"file-not-found"` | 报告 md 没生成成功；回到 `report.mjs` 那一步核对路径 |
 | 上传报 `Content-Type` 相关 400/415 | 手工设置了 multipart 的 `Content-Type`；改为让 `fetch` 自动生成边界 |
+| 上传返回 `ok:true` 但单子上看不到附件 | 站点接受了 POST 不等于挂上了；用 `attach-list` 读回 `fields.attachment` 确认，并核对是否看的是同一站点（生产/测试的 Key 可能同名） |
+| 附件作者与评论作者不是同一人 | 附件按**令牌账号**记录作者，评论按令牌账号写入，属正常现象 |
 | `JIRA_PAT` 缺失导致 review-jira-songlizhi 直接退出 | 忘了凭据桥接；见 §10 的 `export JIRA_PAT="$JIRA_TOKEN"` |
 
 ## 12. 门禁字段与工作流门禁（Jira 管理端配置）
