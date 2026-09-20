@@ -1,6 +1,7 @@
 import importlib.util
 import inspect
 import json
+import os
 import re
 import subprocess
 import sys
@@ -244,7 +245,8 @@ class AsyncAnalysisRouteTests(unittest.TestCase):
         self.assertIn("HTTP 500 response timeout", result)
         self.assertIn("callback-timeout.png", result)
 
-    def test_image_chain_context_includes_local_ocr_text(self):
+    def test_image_chain_context_uses_local_ocr_text_when_enabled(self):
+        """显式开启本地 OCR 时，链路判断仍复用本地 OCR 文本。"""
         routes, _, _, _, _ = load_routes_module()
 
         def fake_ocr(paths):
@@ -261,19 +263,51 @@ class AsyncAnalysisRouteTests(unittest.TestCase):
                 "warnings": [],
             }
 
-        source_text, ocr_result = routes.build_chain_relevance_context(
-            {
-                "source_type": "image",
-                "file_path": "/tmp/error.png",
-                "image_tag": "log_image",
-                "image_description": "调用失败截图",
-            },
-            ocr_extractor=fake_ocr,
-        )
+        with mock.patch.dict("os.environ", {"LOCAL_OCR_ENABLED": "true"}, clear=False):
+            source_text, ocr_result = routes.build_chain_relevance_context(
+                {
+                    "source_type": "image",
+                    "file_path": "/tmp/error.png",
+                    "image_tag": "log_image",
+                    "image_description": "调用失败截图",
+                },
+                ocr_extractor=fake_ocr,
+            )
 
         self.assertIn("see-management-svc", source_text)
         self.assertIn("调用失败截图", source_text)
         self.assertEqual(ocr_result["engine"], "paddleocr")
+
+    def test_image_chain_context_uses_model_by_default_without_local_ocr(self):
+        """默认停用本地 OCR：链路判断直接使用模型识别结果，不调用本地 OCR。"""
+        routes, _, _, _, _ = load_routes_module()
+
+        with mock.patch.dict("os.environ", {}, clear=False):
+            os.environ.pop("LOCAL_OCR_ENABLED", None)
+            original_ai = routes.analyze_uploaded_image
+            routes.analyze_uploaded_image = lambda image_paths, image_tag, image_description="": {
+                "summary": "模型识别摘要",
+                "extracted_text": "url=http://see-management-svc:9008/see-management/facade/prompt/get",
+                "keywords": ["error"],
+                "components": ["see-management-svc"],
+            }
+            try:
+                source_text, ocr_result = routes.build_chain_relevance_context(
+                    {
+                        "source_type": "image",
+                        "file_path": "/tmp/error.png",
+                        "image_tag": "log_image",
+                        "image_description": "调用失败截图",
+                    },
+                    ocr_extractor=lambda paths: self.fail("本地 OCR 默认应停用"),
+                )
+            finally:
+                routes.analyze_uploaded_image = original_ai
+
+        self.assertIn("see-management-svc", source_text)
+        self.assertIn("调用失败截图", source_text)
+        self.assertEqual(ocr_result["engine"], "gpt-vision")
+        self.assertTrue(ocr_result["available"])
 
     def test_image_chain_context_can_fall_back_to_gpt_when_local_ocr_is_disabled(self):
         routes, _, _, _, _ = load_routes_module()
@@ -1603,7 +1637,7 @@ worker.sh:43: exit status 1
         self.assertEqual(len(image_blocks), 2)
         if isinstance(prompt, list):
             prompt = "\n".join(str(item.get("text") or "") for item in prompt if isinstance(item, dict))
-        self.assertIn("不能因为本地 OCR 未识别到文字", prompt)
+        self.assertIn("不能因为图片识别未提取到文字", prompt)
         self.assertIn("逐个识别原图中所有可见的错误", prompt)
         self.assertIn("第1张、第2张", prompt)
 

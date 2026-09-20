@@ -2348,9 +2348,11 @@ def build_chain_relevance_input(data):
 
 
 def _local_ocr_enabled():
-    """处理 _local_ocr_enabled 对应的业务步骤，并向调用方返回所需结果。"""
-    configured = app.config.get("LOCAL_OCR_ENABLED", os.getenv("LOCAL_OCR_ENABLED", "true"))
-    return str(configured).strip().lower() not in {"0", "false", "no", "off"}
+    """判断是否启用本地 OCR；默认停用，图片识别统一交给多模态模型。"""
+    configured = app.config.get("LOCAL_OCR_ENABLED")
+    if configured is None:
+        configured = os.getenv("LOCAL_OCR_ENABLED", "false")
+    return str(configured).strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _gpt_vision_fallback_confidence_threshold():
@@ -2555,7 +2557,7 @@ def build_chain_relevance_context(data, ocr_extractor=None, image_fallback_extra
             if gpt_result.get("available"):
                 ocr_result = gpt_result
     except Exception as exc:
-        logging.exception("Local OCR context extraction failed")
+        logging.exception("图片来源文字提取失败（本地 OCR 通道，默认已停用）")
         ocr_result = _empty_image_ocr_result(str(exc))
     source_text = "\n".join(filter(None, [ocr_result.get("extracted_text"), metadata_text]))
     return source_text, ocr_result
@@ -2605,9 +2607,9 @@ def discover_related_modules_route():
             "status": "image_ocr_unavailable",
             "requiresRelatedEvidence": False,
             "chainAssessmentComplete": False,
-            "message": "本地图片文字识别不可用，无法在分析前判断上下游链路；将保留原图进入综合分析。",
+            "message": "图片识别模型未返回可用结果，无法在分析前判断上下游链路；将保留原图进入综合分析。",
             "reason": "；".join(str(item) for item in warnings if str(item).strip())
-            or "本地 OCR 未返回可用结果。",
+            or "图片识别模型未返回可用结果。",
         })
         return jsonify(decision)
     if decision.get("requiresRelatedEvidence"):
@@ -2807,7 +2809,7 @@ def analyze_code_with_deepseek(
         image_labels = "、".join(f"第{index}张" for index in range(1, len(image_paths) + 1))
         image_error_instruction = (
             f"当前请求包含 {len(image_paths)} 张原始图片（{image_labels}）。"
-            "不能因为本地 OCR 未识别到文字或初步日志分析为 0 个问题，就判断图片中没有错误；"
+            "不能因为图片识别未提取到文字或初步日志分析为 0 个问题，就判断图片中没有错误；"
             "必须逐个识别原图中所有可见的错误、异常提示和失败状态，并在每个 issue 的 evidence 中"
             "注明来源图片序号。每张图片至少要有一个 issue 覆盖；只有明确确认是同一错误的重复截图时"
             "才允许合并，并说明合并依据。即使 image_tag 是 business_image，只要画面中存在日志、"

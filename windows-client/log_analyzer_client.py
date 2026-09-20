@@ -3905,7 +3905,7 @@ class LogAnalyzerWindow:
         if isinstance(discovery.get("imageOcr"), dict):
             self.upload_result["image_ocr"] = dict(discovery["imageOcr"])
         if discovery.get("status") == "image_ocr_unavailable":
-            message = discovery.get("message") or "本地图片文字识别不可用，无法在分析前判断上下游链路；将保留原图进入综合分析。"
+            message = discovery.get("message") or "图片识别模型未返回可用结果，无法在分析前判断上下游链路；将保留原图进入综合分析。"
             self._set_status(message)
             self._show_info_message_async("图片识别不可用", message)
             return [], [], []

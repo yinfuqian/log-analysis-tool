@@ -44,6 +44,7 @@ class AnalysisTaskProgressTests(unittest.TestCase):
         self.assertIn("build_backend_log_analysis", source)
 
     def test_image_ocr_text_becomes_log_content_without_repeating_ocr(self):
+        """显式开启本地 OCR 时，前端回传的 OCR 文本直接复用，不重复识别。"""
         module = load_tasks_module()
         calls = []
         supplied_ocr = {
@@ -59,20 +60,48 @@ class AnalysisTaskProgressTests(unittest.TestCase):
             "warnings": [],
         }
 
-        log_content, result = module.build_image_ocr_log_content(
-            {
-                "image_tag": "log_image",
-                "image_description": "空指针截图",
-                "image_ocr": supplied_ocr,
-            },
-            ["/tmp/error.png"],
-            ocr_extractor=lambda paths: calls.append(paths),
-        )
+        with mock.patch.dict("os.environ", {"LOCAL_OCR_ENABLED": "true"}, clear=False):
+            log_content, result = module.build_image_ocr_log_content(
+                {
+                    "image_tag": "log_image",
+                    "image_description": "空指针截图",
+                    "image_ocr": supplied_ocr,
+                },
+                ["/tmp/error.png"],
+                ocr_extractor=lambda paths: calls.append(paths),
+            )
 
         self.assertEqual(calls, [])
         self.assertIn("NullPointerException", log_content)
         self.assertIn("空指针截图", log_content)
         self.assertEqual(result["average_confidence"], 0.97)
+
+    def test_image_task_uses_model_by_default_without_local_ocr(self):
+        """默认停用本地 OCR：任务侧直接走模型识别，本地 OCR 通道不会被调用。"""
+        module = load_tasks_module()
+        local_calls = []
+
+        with mock.patch.dict("os.environ", {}, clear=False):
+            os.environ.pop("LOCAL_OCR_ENABLED", None)
+            log_content, result = module.build_image_ocr_log_content(
+                {
+                    "image_tag": "log_image",
+                    "image_description": "空指针截图",
+                },
+                ["/tmp/error.png"],
+                ocr_extractor=lambda paths: local_calls.append(paths),
+                image_fallback_extractor=lambda paths, image_tag, image_description: {
+                    "summary": "模型识别摘要",
+                    "extracted_text": "java.lang.NullPointerException",
+                    "keywords": ["nullpointer"],
+                    "components": ["api"],
+                },
+            )
+
+        self.assertEqual(local_calls, [])
+        self.assertIn("NullPointerException", log_content)
+        self.assertEqual(result["engine"], "gpt-vision")
+        self.assertTrue(result["available"])
 
     def test_image_ocr_can_fall_back_to_gpt_when_local_ocr_is_disabled(self):
         module = load_tasks_module()

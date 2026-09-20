@@ -37,3 +37,16 @@ skills/
 技能目录在容器内只读挂载到 `/data/skills`，因此 `jira-gate-1` 统一用绝对路径 `/data/skills/review-jira-songlizhi` 调用另一个技能；`review-jira-songlizhi` 的产物落在技能工作区（`/data/skill-workspace/reports/`），不写进技能目录。`review-jira-songlizhi` 读 `JIRA_PAT`，容器里注入的是 `JIRA_TOKEN`，调用前按它的 `SKILL.md` 做凭据桥接。
 
 技能所需的令牌（例如 Jira 访问令牌）不要提交到仓库，部署时通过挂载文件或环境变量注入。
+
+## 故障分析回写所用的内部接口
+
+`jira-defect-gate` 需要在 worker 内调用本服务的上传与故障分析接口，因此除 `/skill` 的外部令牌外还有一组内部令牌：
+
+| 环境变量 | 作用 | 默认值 |
+|---|---|---|
+| `ANALYSIS_API_BASE_URL` | 技能脚本访问本服务的地址（容器内 `http://api:5000`，宿主网络 `http://127.0.0.1:5000`） | `http://api:5000` |
+| `ANALYSIS_API_TOKEN` | 内部调用令牌，通过 `X-API-Token` 传入 | `local-dev-analysis-token`（生产必须替换，且不要与 `SKILL_API_TOKEN` 相同） |
+| `ANALYSIS_API_TOKEN_PATHS` | 该令牌可访问的路径前缀 | `/analysis,/logfile,/product/get,/module/get,/module/search` |
+| `ANALYSIS_API_USERNAME` | 审计日志中记录的调用方标识 | `analysis-skill` |
+
+`/skill` 系列接口的入参与返回保持不变；内部令牌只影响 `/analysis`、`/logfile` 等回写路径的鉴权范围。

@@ -1,3 +1,4 @@
+import re
 import unittest
 from pathlib import Path
 
@@ -85,6 +86,44 @@ class DockerContractTests(unittest.TestCase):
         # 构建期断言：镜像里必须真的能调用这几个命令，否则构建直接失败。
         self.assertIn("command -v bsdtar >/dev/null", dockerfile)
         self.assertIn("command -v unzip >/dev/null", dockerfile)
+
+    def test_backend_image_installs_system_dependencies_from_offline_debs(self):
+        """后端镜像必须优先使用仓库内离线 deb 包，避免内网构建时依赖 apt 源。"""
+        source = (PROJECT_ROOT / "backend" / "Dockerfile").read_text(encoding="utf-8")
+
+        self.assertIn("--mount=type=bind,source=offline/apt", source)
+        self.assertIn("使用仓库内离线 deb 包安装系统依赖", source)
+
+        packages_match = re.search(r'ARG APT_PACKAGES="([^"]+)"', source)
+        self.assertIsNotNone(packages_match, "Dockerfile 必须声明 ARG APT_PACKAGES 系统依赖清单")
+        packages = packages_match.group(1).split()
+
+        bundle = PROJECT_ROOT / "backend" / "offline" / "apt" / "bookworm-amd64"
+        manifest_path = bundle / "MANIFEST.tsv"
+        self.assertTrue(manifest_path.is_file(), f"缺少离线依赖清单：{manifest_path}")
+
+        bundled = {
+            line.split("\t")[0]
+            for line in manifest_path.read_text(encoding="utf-8").splitlines()
+            if line and not line.startswith("#")
+        }
+        for package in packages:
+            self.assertIn(package, bundled, f"离线 deb 包缺少系统依赖：{package}")
+        # 清单与 deb 包必须一一对应，避免残留过期包。
+        self.assertEqual(len(list(bundle.glob("*.deb"))), len(bundled))
+
+    def test_offline_apt_tooling_is_executable_inside_linux_containers(self):
+        """离线 apt 依赖的下载与校验脚本必须在 Linux 容器内可直接执行。"""
+        for name in ("apt-offline-download.sh", "apt-offline-verify.sh"):
+            data = (PROJECT_ROOT / "scripts" / name).read_bytes()
+            self.assertTrue(data, f"缺少脚本：{name}")
+            self.assertNotIn(b"\r", data, f"{name} 必须使用 LF 行尾")
+
+        exporter = (PROJECT_ROOT / "scripts" / "export_apt_offline_packages.ps1").read_text(encoding="utf-8")
+        self.assertIn("apt-offline-download.sh", exporter)
+        self.assertIn("apt-offline-verify.sh", exporter)
+        self.assertIn("--platform", exporter)
+        self.assertIn("--network", exporter)
 
 
 if __name__ == "__main__":

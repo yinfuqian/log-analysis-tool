@@ -5,7 +5,7 @@
 ## 主要能力
 
 - 日志文件、压缩日志和多张图片统一上传分析。
-- `log_image` 日志截图通过 PaddleOCR 提取文字，`business_image` 作为业务页面参与多模态分析。
+- 图片识别统一由多模态模型逐张完成（本地 PaddleOCR 通道默认停用，可用 `LOCAL_OCR_ENABLED=true` 显式启用），`log_image` 与 `business_image` 都参与多模态分析。
 - 多张图片逐张保留，不相互覆盖；最终结果合并重复问题，但保留不同错误明细。
 - 结合主模块、相关模块、分支或 Tag 代码进行故障定位。
 - `gpt-5.6-sol` 默认启用 `OPENAI_REASONING_EFFORT=high` 深度推理。
@@ -21,7 +21,7 @@
 | --- | --- | --- |
 | `frontend` | Nginx 静态页面和 `/api` 反向代理 | `8080` |
 | `api` | Flask API、认证、上传、Git 和分析任务提交 | `5000` |
-| `worker` | Celery 异步深度分析、OCR 与技能（Codex Agent）执行 | 无宿主机端口 |
+| `worker` | Celery 异步深度分析、图片识别与技能（Codex Agent）执行 | 无宿主机端口 |
 | `migrate` | 创建数据库并执行 `flask db upgrade` | 一次性容器 |
 | `mysql` | 业务数据、知识库和用户操作日志 | `3306` |
 | `redis` | 登录会话、限流状态、Celery Broker 和结果存储 | `6379` |
@@ -130,19 +130,21 @@ OPENAI_REASONING_EFFORT=high
 
 兼容 Chat Completions 的接口使用 `reasoning_effort=high`；兼容 Responses 的接口使用 `reasoning.effort=high`。如第三方服务不支持对应参数，需要由接口提供方实现兼容，或在确认风险后调整推理强度配置。
 
-## PaddleOCR
+## 图片识别与本地 OCR
 
-后端镜像固定安装 Python 3.10、PaddlePaddle、PaddleOCR、OpenCV 和必要的 Linux 原生库。构建镜像时会真实初始化模型并识别一张包含错误文本的测试图片；任何 OCR 初始化或预测失败都会使 Docker 构建失败。
+图片识别默认由多模态模型逐张完成：日志截图、业务页面截图都直接交给模型，识别结果同时用于上下游链路判断和最终故障推理。这条路径不需要下载 OCR 模型，也不会因为本地 OCR 初始化失败而阻塞分析。
 
-OCR 模型保存在 `ocr-models` 命名卷。首次构建或清空卷后需要下载模型，界面会提示“图片模型加载时间长，请耐心等待”。
+本地 PaddleOCR 通道**默认停用**（`LOCAL_OCR_ENABLED=false`）。仅在明确的离线或成本场景下才建议开启：设为 `true` 后，日志截图会先跑本地 OCR，置信度低于 `OCR_GPT_FALLBACK_CONFIDENCE`（默认 `0.6`）时再回退模型识别。
 
-验证 OCR：
+后端镜像仍然安装 Python 3.10、PaddlePaddle、PaddleOCR、OpenCV 和必要的 Linux 原生库，模型缓存写入 `ocr-models` 命名卷；需要保留这条离线预检能力时可以直接使用。
+
+验证 OCR 运行环境：
 
 ```powershell
 docker compose exec api python verify_runtime.py --ocr
 ```
 
-当 `LOCAL_OCR_ENABLED=false` 或 OCR 运行失败时，图片仍可进入后续多模态分析，但日志截图的本地文字证据会降级，结果中会明确说明本地图片服务不可用。
+关闭本地 OCR 后，若模型识别没有返回可用文字，结果中会明确说明“图片识别模型未返回可用结果”，并保留原图继续多模态分析。
 
 ## 数据库迁移
 
@@ -232,6 +234,21 @@ powershell -ExecutionPolicy Bypass -File scripts\build_release_images.ps1 backen
 
 后端的 `migrate`、`api`、`worker` 共用一个后端镜像；前端使用独立镜像。因此后端代码变化只发布一个后端镜像，前端代码变化只发布一个前端镜像。
 
+### 离线 apt 系统依赖
+
+后端镜像构建阶段需要从 Debian 源安装 `git`、`curl`、`bsdtar`、`unzip` 和 7-Zip 系命令等系统依赖。仓库内
+`backend/offline/apt/bookworm-amd64` 已预置这些软件包及其递归依赖的离线 deb 包，构建时自动优先使用本地包，
+因此内网没有 apt 源也能构建后端镜像；未命中该目录时仍按 `${APT_MIRROR}` 在线安装。
+
+系统依赖清单（`backend/Dockerfile` 的 `ARG APT_PACKAGES`）变化后需要重新导出：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\export_apt_offline_packages.ps1
+```
+
+脚本会下载 deb 包并生成 `MANIFEST.tsv`、`SHA256SUMS`，最后在 `--network none` 的容器内做一次断网安装自检。
+ARM 服务器需要额外导出 `-Architecture arm64`。详细说明见 `backend/offline/apt/README.md`。
+
 ### 生成精简生产部署包
 
 首次部署或生产 Compose、配置模板发生变化时生成部署包：
@@ -309,6 +326,16 @@ curl -X POST http://127.0.0.1:5000/skill/run \
         "jira_url": "https://jira.in.wezhuiyi.com/browse/CALL-1446",
         "inputs": {}
       }'
+
+# 缺陷单门禁 + 自动故障分析：产品与模块既可用名称，也可用工具里的 ID
+curl -X POST http://127.0.0.1:5000/skill/run \
+  -H "X-API-Token: <SKILL_API_TOKEN>" \
+  -H "Content-Type: application/json" \
+  -d '{
+        "skill_id": "jira-defect-gate",
+        "jira_url": "https://jira.in.wezhuiyi.com/browse/KEY-1234",
+        "inputs": {"product": "客户服务", "module": "工单管理", "tagVersion": "v3.2.1"}
+      }'
 ```
 
 返回 `202`：
@@ -340,7 +367,7 @@ curl -H "X-API-Token: <SKILL_API_TOKEN>" http://127.0.0.1:5000/skill/task/SKL-8F
 | `SKILL_API_TOKEN` | `local-dev-token` | 外部系统调用 `/skill` 接口的独立令牌；默认值仅供本地验证，生产环境必须替换为随机强令牌 |
 | `SKILL_URL_ALLOWED_HOSTS` | `jira.in.wezhuiyi.com` | `jira_url` 主机白名单，逗号分隔；留空表示不限制 |
 | `SKILL_WORKSPACE_DIR` | `/data/skill-workspace` | 技能工作目录 |
-| `CODEX_SKILL_TIMEOUT` | `1800` | 单次技能执行超时秒数 |
+| `CODEX_SKILL_TIMEOUT` | `1800` | 单次技能执行超时秒数；`jira-defect-gate` 还要等故障分析完成，建议生产环境提高到 `3600` |
 | `CODEX_MODEL` | `codex/deepseek-flash` | Codex 使用的模型 |
 | `CODEX_MODEL_PROVIDER` | `skillrun` | 模型提供方标识，后端以 `-c model_provider=...` 传给 Codex |
 | `CODEX_BASE_URL` | `https://newapi.in.wezhuiyi.com/v1` | 模型中转地址；未配置时回退 `OPENAI_URL` |
@@ -353,6 +380,8 @@ curl -H "X-API-Token: <SKILL_API_TOKEN>" http://127.0.0.1:5000/skill/task/SKL-8F
 | `SKILLS_DIR` | `/data/skills` | 技能目录，容器内由 `./skills` 只读挂载而来，Codex 运行时不会改写它 |
 | `JIRA_TOKEN` | 无（**必填**） | 注入给技能脚本的 Jira 个人访问令牌；也可把令牌文件放到 `skills/.jira-token` |
 | `JIRA_BASE_URL` | `https://jira.in.wezhuiyi.com` | 注入给技能脚本的 Jira 站点地址 |
+| `ANALYSIS_API_BASE_URL` | `http://api:5000` | `jira-defect-gate` 回写时调用的本服务地址（宿主网络改为 `http://127.0.0.1:5000`） |
+| `ANALYSIS_API_TOKEN` | `local-dev-analysis-token` | 技能脚本调用 `/analysis`、`/logfile` 等接口的内部令牌；生产环境必须替换 |
 
 技能运行参数由后端以 `codex exec -c ...` 传入（模型、中转地址、请求协议、推理强度等），容器内无需维护 `config.toml`；
 需要附加 Codex 配置时用 `CODEX_EXTRA_ARGS` 追加，例如 `CODEX_EXTRA_ARGS=-c model_context_window=128000`。
@@ -410,17 +439,40 @@ cd backend
 
 Windows 上 Celery 必须使用 `--pool=solo`；`--no-reload` 用于避免 Flask 重载子进程残留占用 `5000` 端口。
 
-5. 自检与调用（`SKILL_API_TOKEN` 即 `backend/.env` 中配置的令牌）：
+5. 技能相关的本地配置（`backend/.env` 或仓库根 `.env`，根 `.env` 会被自动读取）：
+
+```dotenv
+# 技能目录：默认值是容器内的 /data/skills，Windows 本地必须指向仓库 skills 目录，
+# 否则 /skill/list 会返回空列表。
+SKILLS_DIR=E:\zhuiyi\log-analysis-tool\skills
+# 技能脚本回写故障分析时访问的服务地址与内部令牌，两个令牌不要用同一个值。
+ANALYSIS_API_BASE_URL=http://127.0.0.1:5000
+ANALYSIS_API_TOKEN=local-dev-analysis-token
+```
+
+6. 自检与调用（`SKILL_API_TOKEN` 即 `backend/.env` 中配置的令牌）：
 
 ```powershell
 node ..\skills\jira-gate-1\scripts\jira-cli.mjs selftest
+node ..\skills\jira-defect-gate\scripts\jira-cli.mjs selftest
+node ..\skills\jira-defect-gate\scripts\analysis-cli.mjs selftest
+node ..\skills\jira-defect-gate\scripts\analysis-cli.mjs resolve --product yibot --module yibot-server
 curl -H "X-API-Token: local-dev-token" http://127.0.0.1:5000/health/ready
 curl -H "X-API-Token: local-dev-token" http://127.0.0.1:5000/skill/list
+```
+
+只想看 HTML 报告的排版、不想真的跑一次分析时，可以用既有结果 JSON 直接渲染，不访问网络：
+
+```powershell
+node ..\skills\jira-defect-gate\scripts\analysis-cli.mjs render --input <结果JSON> --out 报告.html
 ```
 
 **验证注意事项**
 
 - `jira-gate-1` 在达标与不达标两种情况下都会**真实写入 Jira 评论**（内容是逐项打标记的检查项清单）。本地验证请使用测试单或临时项目单，不要拿正式需求单试跑。
+- `jira-defect-gate` 同样会真实写评论；没有自查结果时还会上传 HTML 报告附件并消耗一次完整的故障分析（拉代码 + 模型推理）。本地验证请使用测试缺陷单。
+- 异步分析依赖 Redis：`/health/ready` 的 `checks.redis` 必须是 `ok`，否则 `/analysis/submit_async` 无法入队（技能第 3 步会失败）。上传与分析提交本身不依赖 Redis 之外的组件。
+- 未配置 `LOCAL_OCR_ENABLED=true` 时图片识别走多模态模型；本地 `.env` 若仍写着 `true`，可用会话变量覆盖（`$env:LOCAL_OCR_ENABLED = "false"`），根 `.env` 的值不会覆盖已有环境变量。
 - 想先验证链路而不碰 Jira，可临时新建一个只回复结论的测试技能目录，并把 `SKILLS_DIR` 指向该目录。
 - 本地 `node` 版本需与容器内一致（默认 `0.142.5`）；用 `codex --version` 确认，必要时通过 `CODEX_BIN` 指定完整路径。
 - 首次运行会在 `CODEX_HOME` 内生成 Codex CLI 自身的状态文件（`state_*.sqlite` 等，与业务数据库无关），并保留技能工作目录，均属预期行为。本地默认指向 `backend/local-data/codex-home`，容器内落在 `codex-home` 卷，都不会污染仓库目录。
@@ -541,10 +593,15 @@ docker compose logs api
 
 ### 图片长时间停在分析中
 
-首次 OCR 模型加载通常较慢。查看 Worker 日志并执行 OCR 自检：
+图片识别走多模态模型，长图或大图会明显更慢（默认本地 OCR 已停用）。先查看 Worker 日志确认当前阶段：
 
 ```powershell
 docker compose logs -f worker
+```
+
+若确实需要本地 OCR 预检，再显式开启并检查运行环境：
+
+```powershell
 docker compose exec api python verify_runtime.py --ocr
 ```
 

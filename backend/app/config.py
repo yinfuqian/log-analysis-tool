@@ -125,6 +125,11 @@ class Config:
     MAX_IMAGE_COUNT = int(os.getenv("MAX_IMAGE_COUNT", "10"))
     MAX_IMAGE_PIXELS = int(os.getenv("MAX_IMAGE_PIXELS", "40000000"))
 
+    # 图片识别：默认由多模态模型逐张识别（本地 PaddleOCR 通道默认停用）。
+    # 只有显式设置 LOCAL_OCR_ENABLED=true 才会先跑本地 OCR；OCR_GPT_FALLBACK_CONFIDENCE
+    # 仅在该本地通道被启用且识别置信度偏低时生效。
+    OCR_GPT_FALLBACK_CONFIDENCE = os.getenv("OCR_GPT_FALLBACK_CONFIDENCE", "0.6")
+
     # 存储类型: 'local'（本地存储） | 'minio'（MinIO） | 'nas'（NAS）
     STORAGE_TYPE = os.getenv("STORAGE_TYPE", "local")
 
@@ -227,6 +232,14 @@ class Config:
     CODEX_NETWORK_RETRY_LIMIT = int(_env_or("CODEX_NETWORK_RETRY_LIMIT", "10"))
     # worker 启动时是否把上一次运行遗留的“执行中”任务标记为失败。
     SKILL_RECOVER_ORPHANS = _env_or("SKILL_RECOVER_ORPHANS", "true").lower() == "true"
+    # 技能回写故障分析：worker 内的技能脚本使用内部令牌调用本服务的上传与故障分析接口。
+    # 令牌留空表示关闭该内部通道；路径前缀用于限制令牌可访问的接口范围。
+    ANALYSIS_API_TOKEN = os.getenv("ANALYSIS_API_TOKEN", "")
+    ANALYSIS_API_TOKEN_PATHS = _env_or(
+        "ANALYSIS_API_TOKEN_PATHS", "/analysis,/logfile,/product/get,/module/get,/module/search"
+    )
+    ANALYSIS_API_USERNAME = _env_or("ANALYSIS_API_USERNAME", "analysis-skill")
+    ANALYSIS_API_BASE_URL = _env_or("ANALYSIS_API_BASE_URL", "")
     LOG_ERROR_CONTEXT_LINES = int(os.getenv("LOG_ERROR_CONTEXT_LINES", "10"))
     LOG_CONTEXT_MAX_CHARS = int(os.getenv("LOG_CONTEXT_MAX_CHARS", "30000"))
     

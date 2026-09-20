@@ -1,0 +1,703 @@
+/**
+ * jira.mjs —— 缺陷单门禁（缺陷单完整性检查 + 自查结果检查 + 故障分析回写）使用的 Jira 客户端。
+ *
+ * 运行环境约束：
+ *   - 服务器容器 / codex exec：没有 node_repl，直接通过 shell 执行 scripts/jira-cli.mjs。
+ *   - 桌面 Codex（node_repl）：没有 process、不支持静态 import，因此本文件只用 await import()
+ *     动态加载 node 内置模块，令牌从文件读取；改脚本后请用 ?v=时间戳 强制重新加载。
+ *   - 所有写操作（评论、附件、门禁字段、流转）都走 REST，请求头固定带 X-Atlassian-Token: no-check。
+ */
+export const DEFAULT_BASE_URL = "https://jira.in.wezhuiyi.com";
+
+/** 令牌文件候选名（相对技能目录、技能目录上一级与 ~/.codex） */
+const TOKEN_FILE_NAMES = [".jira-token", ".jira-token.txt", "jira-token.txt"];
+
+/** 缺陷单门禁字段默认候选名，可用 jira-config.json 覆盖 */
+const DEFAULT_GATE_FIELD_NAMES = {
+  result: ["缺陷单预检结论", "缺陷单门禁结论", "缺陷单准入结论"],
+  selfCheck: ["缺陷单自查结论", "缺陷单自查结果"],
+  report: ["缺陷单分析报告", "故障分析报告"],
+  checkedAt: ["缺陷单预检时间", "缺陷单门禁时间", "缺陷单准入预检时间"],
+};
+
+/** 自查结果评论的判定关键词，可用 jira-config.json 的 selfCheckKeywords 覆盖 */
+export const SELF_CHECK_KEYWORDS = {
+  headline: ["自查", "自检", "自我排查", "自测"],
+  conclusion: ["结论", "结果", "通过", "正常", "无异常", "已定位", "已确认", "已修复", "根因", "原因"],
+  evidence: ["日志", "截图", "复现", "环境", "版本", "时间点", "步骤", "附件", "操作", "报错"],
+};
+
+/** 从任意输入中解析 Jira 问题 Key */
+export function parseIssueKey(input) {
+  if (!input) return null;
+  const raw = String(input).trim();
+  let decoded = raw;
+  try { decoded = decodeURIComponent(raw); } catch (e) { decoded = raw; }
+  const haystack = decoded === raw ? raw : raw + "\n" + decoded;
+  const patterns = [
+    /^([A-Z][A-Z0-9_]*-\d+)$/i,
+    /\/browse\/([A-Z][A-Z0-9_]*-\d+)/i,
+    /[?&]selectedIssue=([A-Z][A-Z0-9_]*-\d+)/i,
+    /[?&](?:key|issue)=([A-Z][A-Z0-9_]*-\d+)/i,
+    /(?:^|[^A-Za-z0-9_])([A-Z][A-Z0-9_]{1,20}-\d{1,8})(?![A-Za-z0-9_-])/,
+  ];
+  for (const re of patterns) {
+    const m = haystack.match(re);
+    if (m) return m[1].toUpperCase();
+  }
+  return null;
+}
+
+/** 返回技能目录的绝对路径（统一用正斜杠，失败时返回 null） */
+export function skillDir() {
+  try {
+    const m = String(import.meta.url).match(/^file:\/\/\/(.+)\/scripts\/jira\.mjs(?:[?#].*)?$/i);
+    if (!m) return null;
+    let dir = m[1];
+    try { dir = decodeURIComponent(dir); } catch (e) { /* 保留原始路径 */ }
+    return dir.replace(/\\/g, "/").replace(/\/+$/, "");
+  } catch (e) {
+    return null;
+  }
+}
+
+/** 读取 JIRA_TOKEN 环境变量（node_repl 下没有 process） */
+function envToken() {
+  try {
+    if (typeof process !== "undefined" && process.env && process.env.JIRA_TOKEN) {
+      return String(process.env.JIRA_TOKEN).trim() || null;
+    }
+  } catch (e) { /* node_repl 无 process */ }
+  return null;
+}
+
+/** 读取环境变量（node_repl 下缺失时返回空串） */
+export function envValue(name) {
+  try {
+    if (typeof process !== "undefined" && process.env && process.env[name]) {
+      return String(process.env[name]);
+    }
+  } catch (e) { /* node_repl 无 process */ }
+  return "";
+}
+
+/**
+ * 解析 Jira 令牌，返回 { token, source, baseUrl, auth, username }。
+ * 优先级：显式传入 > JIRA_TOKEN 环境变量 > 技能目录与 ~/.codex 下的令牌文件。
+ */
+export async function resolveToken(explicit) {
+  const fromEnv = String(explicit || "").trim() || envToken();
+  if (fromEnv) return { token: fromEnv, source: explicit ? "argument" : "environment" };
+
+  const fs = await import("node:fs");
+  const dir = skillDir();
+  const candidates = [];
+  if (dir) {
+    for (const name of TOKEN_FILE_NAMES) candidates.push(dir + "/" + name);
+    for (const name of TOKEN_FILE_NAMES) candidates.push(dir + "/../" + name);
+    candidates.push(dir + "/../../jira-token.txt");
+    candidates.push(dir + "/../../jira/token.txt");
+    candidates.push(dir + "/../../jira/config.json");
+  }
+  for (const file of candidates) {
+    try {
+      if (!fs.existsSync(file)) continue;
+      const text = fs.readFileSync(file, "utf8").trim();
+      if (!text) continue;
+      if (text.startsWith("{")) {
+        const cfg = JSON.parse(text);
+        if (cfg.token) {
+          return {
+            token: String(cfg.token).trim(),
+            source: file,
+            baseUrl: cfg.baseUrl,
+            auth: cfg.auth,
+            username: cfg.username,
+          };
+        }
+        continue;
+      }
+      const firstLine = text.split(/\r?\n/).find((line) => line.trim()) || "";
+      const token = firstLine.replace(/^JIRA_PAT\s*=\s*/i, "").trim();
+      if (token) return { token, source: file };
+    } catch (e) { /* 忽略单个候选文件的读取错误 */ }
+  }
+  return { token: null, source: null, checked: candidates };
+}
+
+/** 组装认证头：默认 Bearer；配置 auth=basic 时用 Basic */
+export function buildAuthHeader(cred) {
+  const mode = String(cred.auth || "bearer").toLowerCase();
+  if (mode === "basic") {
+    const raw = String(cred.username || "") + ":" + String(cred.token || "");
+    if (typeof Buffer !== "undefined") return "Basic " + Buffer.from(raw, "utf8").toString("base64");
+    return "Basic " + btoa(unescape(encodeURIComponent(raw)));
+  }
+  return "Bearer " + cred.token;
+}
+
+/** 统一发起 REST 请求：options 支持 token/baseUrl/body/formData/raw/skipAuth */
+export async function request(method, apiPath, options = {}) {
+  const cred = await resolveToken(options.token || null);
+  const baseUrl = String(options.baseUrl || cred.baseUrl || DEFAULT_BASE_URL).replace(/\/+$/, "");
+  const headers = { Accept: "application/json", "X-Atlassian-Token": "no-check" };
+  if (cred.token) headers.Authorization = buildAuthHeader(cred);
+  let payload;
+  if (options.formData !== undefined) {
+    payload = options.formData;
+  } else if (options.body !== undefined) {
+    headers["Content-Type"] = "application/json";
+    payload = typeof options.body === "string" ? options.body : JSON.stringify(options.body);
+  }
+  const target = /^https?:\/\//i.test(apiPath) ? apiPath : baseUrl + apiPath;
+  const res = await fetch(target, { method, headers, body: payload, redirect: "follow" });
+  if (options.raw) return res;
+  const text = await res.text();
+  let data = null;
+  try { data = text ? JSON.parse(text) : null; } catch (e) { data = text; }
+  if (!res.ok) {
+    let detail = "";
+    if (data && typeof data === "object") {
+      detail = [].concat(data.errorMessages || [], Object.values(data.errors || {})).filter(Boolean).join("; ");
+    } else if (typeof data === "string") {
+      detail = data.replace(/<[^>]+>/g, " ").slice(0, 300);
+    }
+    const err = new Error("Jira " + method + " " + apiPath + " 失败：HTTP " + res.status + (detail ? " — " + detail : ""));
+    err.status = res.status;
+    err.data = data;
+    throw err;
+  }
+  return data;
+}
+
+/** 获取当前登录用户（用于确认令牌有效） */
+export async function myself(options = {}) {
+  return await request("GET", "/rest/api/2/myself", options);
+}
+
+/** 字段值转纯文本 */
+function toPlainText(value) {
+  if (value === null || value === undefined) return "";
+  if (typeof value === "string") return value;
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  if (Array.isArray(value)) return value.map(toPlainText).filter(Boolean).join("\n");
+  if (typeof value === "object") {
+    if (value.type === "doc" && Array.isArray(value.content)) return toPlainText(value.content);
+    if (value.value !== undefined) return toPlainText(value.value);
+    if (value.name !== undefined) return toPlainText(value.name);
+    if (value.text !== undefined) return toPlainText(value.text);
+    if (Array.isArray(value.content)) return toPlainText(value.content);
+    const keys = Object.keys(value).filter((k) => !["self", "id", "disabled", "iconUrl"].includes(k));
+    if (!keys.length) return "";
+    try { return JSON.stringify(value); } catch (e) { return ""; }
+  }
+  return String(value);
+}
+
+/** 与判定无关的纯噪音字段，渲染时跳过 */
+const NOISE_FIELD_NAMES = ["Rank", "Global Rank", "Development", "Story point estimate", "Σ Progress"];
+
+/** HTML 去标签，保留段落与换行 */
+function htmlToText(html) {
+  if (!html) return "";
+  return String(html)
+    .replace(/<\s*br\s*\/?\s*>/gi, "\n")
+    .replace(/<\s*\/(p|div|li|tr|h[1-6])\s*>/gi, "\n")
+    .replace(/<\s*li[^>]*>/gi, "- ")
+    .replace(/<[^>]+>/g, "")
+    .replace(/&nbsp;/g, " ")
+    .replace(/&lt;/g, "<").replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&amp;/g, "&")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+const NO_VALUE = ["", "无", "None", "null", "未设置", "-"];
+
+/** 清理 Jira wiki 渲染标记，避免噪音干扰判定 */
+export function cleanWikiMarkup(text) {
+  if (!text) return "";
+  return String(text)
+    .replace(/\{\s*color(:[^}]*)?\s*\}/gi, "")
+    .replace(/\{\s*(?:code|noformat|panel|quote|info|note|warning|tip|expand)(?::[^}]*)?\s*\}/gi, "")
+    .replace(/\[\^([^\]]+)\]/g, "$1")
+    .replace(/\{anchor:[^}]*\}/gi, "")
+    .trim();
+}
+
+/** 是否视为“没有填写” */
+export function isEmptyValue(value) {
+  const text = toPlainText(value).trim();
+  return text === "" || NO_VALUE.includes(text);
+}
+
+/** 把 Jira 原始返回规范化成便于判定的结构 */
+export function normalizeIssue(raw) {
+  const f = raw.fields || {};
+  const names = raw.names || {};
+  const baseUrl = (raw.self || "").split("/rest/")[0] || DEFAULT_BASE_URL;
+
+  const customFields = {};
+  for (const [id, name] of Object.entries(names)) {
+    if (!id.startsWith("customfield_")) continue;
+    const value = f[id];
+    if (value === undefined || value === null) continue;
+    customFields[name] = toPlainText(value).trim();
+  }
+
+  const pick = (user) => (user ? { name: user.name, displayName: user.displayName, email: user.emailAddress } : null);
+
+  const links = [];
+  for (const link of f.issuelinks || []) {
+    const other = link.outwardIssue || link.inwardIssue;
+    if (!other) continue;
+    links.push({
+      type: link.type ? link.type.name : "",
+      direction: link.outwardIssue ? "outward" : "inward",
+      label: (link.outwardIssue ? link.type.outward : link.type.inward) || "",
+      key: other.key,
+      summary: other.fields ? other.fields.summary : "",
+      status: other.fields && other.fields.status ? other.fields.status.name : "",
+    });
+  }
+
+  const descriptionHtml = (raw.renderedFields && raw.renderedFields.description) || "";
+  const description = cleanWikiMarkup(toPlainText(f.description) || htmlToText(descriptionHtml));
+
+  return {
+    key: raw.key,
+    id: raw.id,
+    url: baseUrl + "/browse/" + raw.key,
+    summary: f.summary,
+    issueType: f.issuetype ? f.issuetype.name : "",
+    status: f.status ? f.status.name : "",
+    statusCategory: f.status && f.status.statusCategory ? f.status.statusCategory.name : "",
+    priority: f.priority ? f.priority.name : "",
+    resolution: f.resolution ? f.resolution.name : "",
+    created: f.created,
+    updated: f.updated,
+    dueDate: f.duedate,
+    project: f.project ? { key: f.project.key, name: f.project.name } : null,
+    reporter: pick(f.reporter),
+    creator: pick(f.creator),
+    assignee: pick(f.assignee),
+    labels: f.labels || [],
+    components: (f.components || []).map((c) => c.name),
+    fixVersions: (f.fixVersions || []).map((v) => v.name),
+    affectedVersions: (f.versions || []).map((v) => v.name),
+    environment: toPlainText(f.environment),
+    description,
+    descriptionHtml,
+    customFields,
+    attachments: (f.attachment || []).map((a) => ({
+      id: a.id,
+      filename: a.filename,
+      size: a.size,
+      mimeType: a.mimeType,
+      created: a.created,
+      author: a.author ? a.author.displayName : "",
+      content: a.content,
+    })),
+    links,
+    subtasks: (f.subtasks || []).map((s) => ({
+      key: s.key,
+      summary: s.fields ? s.fields.summary : "",
+      status: s.fields && s.fields.status ? s.fields.status.name : "",
+      assignee: s.fields && s.fields.assignee ? s.fields.assignee.displayName : "",
+      issueType: s.fields && s.fields.issuetype ? s.fields.issuetype.name : "",
+    })),
+    comments: ((f.comment && f.comment.comments) || []).map((c) => ({
+      id: c.id,
+      author: c.author ? c.author.displayName : "",
+      authorName: c.author ? c.author.name : "",
+      created: c.created,
+      updated: c.updated,
+      body: cleanWikiMarkup(toPlainText(c.body)),
+    })),
+  };
+}
+
+/** 通过 JQL 查询以该单为父的子任务（部分项目 subtasks 字段不可用时兜底） */
+export async function fetchSubtasksByParent(keyOrUrl, options = {}) {
+  const key = parseIssueKey(keyOrUrl);
+  if (!key) return [];
+  try {
+    const jql = encodeURIComponent("parent = " + key);
+    const data = await request("GET", "/rest/api/2/search?jql=" + jql + "&fields=summary,status,assignee,issuetype&maxResults=50", options);
+    return (data.issues || []).map((s) => ({
+      key: s.key,
+      summary: s.fields ? s.fields.summary : "",
+      status: s.fields && s.fields.status ? s.fields.status.name : "",
+      assignee: s.fields && s.fields.assignee ? s.fields.assignee.displayName : "",
+      issueType: s.fields && s.fields.issuetype ? s.fields.issuetype.name : "",
+    }));
+  } catch (e) {
+    return [];
+  }
+}
+
+/** 获取并规范化单个缺陷单（含全量评论与父单兜底子任务） */
+export async function getIssue(keyOrUrl, options = {}) {
+  const key = parseIssueKey(keyOrUrl);
+  if (!key) throw new Error("无法从输入中解析 Jira 问题 Key：" + keyOrUrl);
+  const data = await request("GET", "/rest/api/2/issue/" + encodeURIComponent(key) + "?expand=names,renderedFields,schema", options);
+  const issue = normalizeIssue(data);
+  if (!issue.subtasks.length) {
+    const found = await fetchSubtasksByParent(key, options);
+    if (found.length) issue.subtasks = found;
+  }
+  const commentMeta = (data.fields && data.fields.comment) || {};
+  if (commentMeta.total && commentMeta.total > issue.comments.length) {
+    const all = await request("GET", "/rest/api/2/issue/" + encodeURIComponent(key) + "/comment", options);
+    if (all && Array.isArray(all.comments)) {
+      issue.comments = all.comments.map((c) => ({
+        id: c.id,
+        author: c.author ? c.author.displayName : "",
+        authorName: c.author ? c.author.name : "",
+        created: c.created,
+        updated: c.updated,
+        body: cleanWikiMarkup(toPlainText(c.body)),
+      }));
+    }
+  }
+  return issue;
+}
+
+/** 把规范化后的缺陷单渲染为便于判定的 Markdown 摘要 */
+export function renderIssueMarkdown(issue, options = {}) {
+  const maxDesc = options.maxDescriptionChars || 8000;
+  const maxComments = options.maxComments || 10;
+  const maxCommentChars = options.maxCommentChars || 1200;
+  const lines = [];
+  const kv = (k, v) => lines.push("- " + k + "：" + (isEmptyValue(v) ? "（空）" : toPlainText(v)));
+
+  lines.push("# " + issue.key + " " + (issue.summary || ""));
+  lines.push("");
+  lines.push("- 链接：" + issue.url);
+  kv("类型", issue.issueType);
+  kv("状态", issue.status);
+  kv("优先级", issue.priority);
+  kv("经办人", issue.assignee ? issue.assignee.displayName : "");
+  kv("报告人", issue.reporter ? issue.reporter.displayName : "");
+  kv("模块", (issue.components || []).join("、"));
+  kv("影响版本", (issue.affectedVersions || []).join("、"));
+  kv("修复版本", (issue.fixVersions || []).join("、"));
+  kv("环境", issue.environment);
+  kv("创建 / 更新", (issue.created || "") + " / " + (issue.updated || ""));
+
+  const customKeys = Object.keys(issue.customFields || {}).filter((name) => !NOISE_FIELD_NAMES.includes(name));
+  if (customKeys.length) {
+    lines.push("");
+    lines.push("## 自定义字段");
+    for (const name of customKeys) kv(name, issue.customFields[name]);
+  }
+
+  lines.push("");
+  lines.push("## 描述");
+  const description = String(issue.description || "").slice(0, maxDesc);
+  lines.push(description || "（描述为空）");
+
+  if (issue.attachments.length) {
+    lines.push("");
+    lines.push("## 附件（" + issue.attachments.length + " 个）");
+    for (const a of issue.attachments) {
+      lines.push("- " + a.filename + "（" + Math.round((a.size || 0) / 1024) + " KB，" + (a.author || "未知") + "，" + (a.created || "") + "）");
+    }
+  }
+
+  if (issue.links.length) {
+    lines.push("");
+    lines.push("## 问题链接");
+    for (const l of issue.links) lines.push("- " + l.label + " " + l.key + " " + (l.summary || "") + "（" + (l.status || "") + "）");
+  }
+
+  lines.push("");
+  lines.push("## 评论（共 " + issue.comments.length + " 条，显示最近 " + Math.min(maxComments, issue.comments.length) + " 条）");
+  for (const c of issue.comments.slice(-maxComments)) {
+    const body = c.body.length > maxCommentChars ? c.body.slice(0, maxCommentChars) + "…（截断）" : c.body;
+    lines.push("### " + c.author + " @ " + c.created + (c.updated && c.updated !== c.created ? "（编辑于 " + c.updated + "）" : ""));
+    lines.push(body);
+    lines.push("");
+  }
+  if (!issue.comments.length) lines.push("- （无评论）");
+
+  return lines.join("\n");
+}
+
+/** 下载缺陷单附件到本地目录，返回 [{ filename, path, size }] */
+export async function downloadAttachments(keyOrUrl, outDir, options = {}) {
+  const fs = await import("node:fs");
+  const issue = options.issue || await getIssue(keyOrUrl, options);
+  const saved = [];
+  try { fs.mkdirSync(outDir, { recursive: true }); } catch (e) { /* 目录已存在 */ }
+  for (const a of issue.attachments) {
+    if (options.only && !options.only.some((kw) => String(a.filename).includes(kw))) continue;
+    const safeName = String(a.filename).replace(/[\\/:*?"<>|]/g, "_");
+    const target = outDir.replace(/\/+$/, "") + "/" + safeName;
+    try {
+      const res = await request("GET", a.content, { ...options, raw: true });
+      if (!res.ok) throw new Error("HTTP " + res.status);
+      const buf = Buffer.from(await res.arrayBuffer());
+      fs.writeFileSync(target, buf);
+      saved.push({ filename: a.filename, path: target, size: buf.length });
+    } catch (e) {
+      saved.push({ filename: a.filename, path: null, error: e.message });
+    }
+  }
+  return saved;
+}
+
+/** 写入评论 */
+export async function addComment(keyOrUrl, body, options = {}) {
+  const key = parseIssueKey(keyOrUrl);
+  if (!key) throw new Error("无法解析 Jira 问题 Key：" + keyOrUrl);
+  if (!body || !String(body).trim()) throw new Error("评论内容为空，已阻止写入");
+  return await request("POST", "/rest/api/2/issue/" + encodeURIComponent(key) + "/comment", { ...options, body: { body: String(body) } });
+}
+
+/** 更新既有评论 */
+export async function updateComment(keyOrUrl, commentId, body, options = {}) {
+  const key = parseIssueKey(keyOrUrl);
+  return await request("PUT", "/rest/api/2/issue/" + encodeURIComponent(key) + "/comment/" + commentId, { ...options, body: { body: String(body) } });
+}
+
+/**
+ * 上传附件（用于把故障分析 HTML 报告放进缺陷单评论区）。
+ * 依赖运行时提供 FormData / Blob（Node 18+ 与 node_repl 均可用）。
+ */
+export async function addAttachment(keyOrUrl, filePath, options = {}) {
+  const fs = await import("node:fs");
+  const path = await import("node:path");
+  const key = parseIssueKey(keyOrUrl);
+  if (!key) throw new Error("无法解析 Jira 问题 Key：" + keyOrUrl);
+  if (!fs.existsSync(filePath)) throw new Error("附件文件不存在：" + filePath);
+  if (typeof FormData === "undefined" || typeof Blob === "undefined") {
+    throw new Error("当前运行时缺少 FormData/Blob，无法上传附件；请改用 Node 18+ 执行 jira-cli.mjs");
+  }
+  const filename = options.filename || path.basename(filePath);
+  const form = new FormData();
+  form.append("file", new Blob([fs.readFileSync(filePath)]), filename);
+  return await request("POST", "/rest/api/2/issue/" + encodeURIComponent(key) + "/attachments", {
+    ...options,
+    formData: form,
+  });
+}
+
+/** 从评论中筛选满足判定的条目，返回带证据片段的数组 */
+export function findComments(issue, predicate) {
+  const comments = (issue && issue.comments) || [];
+  return comments.filter((c) => {
+    try { return !!predicate(c); } catch (e) { return false; }
+  });
+}
+
+/**
+ * 判断缺陷单评论区里是否已经有“自查结果”。
+ * 规则：评论中同时出现自查类关键词、结论类关键词与证据类关键词，才算有效自查结果。
+ * 关键词可用 jira-config.json 的 selfCheckKeywords 覆盖（{ headline, conclusion, evidence }）。
+ */
+export function findSelfCheckComments(issue, options = {}) {
+  const keywords = {
+    headline: options.headline || SELF_CHECK_KEYWORDS.headline,
+    conclusion: options.conclusion || SELF_CHECK_KEYWORDS.conclusion,
+    evidence: options.evidence || SELF_CHECK_KEYWORDS.evidence,
+  };
+  const hit = (text, list) => list.some((kw) => text.includes(kw));
+  const matches = [];
+  for (const comment of (issue && issue.comments) || []) {
+    const text = String(comment.body || "");
+    if (!text.trim()) continue;
+    const headline = hit(text, keywords.headline);
+    const conclusion = hit(text, keywords.conclusion);
+    const evidence = hit(text, keywords.evidence);
+    if (!(headline && conclusion && evidence)) continue;
+    const line = text.split(/\r?\n/).find((item) => item.trim()) || text.slice(0, 120);
+    matches.push({
+      commentId: comment.id,
+      author: comment.author,
+      created: comment.created,
+      snippet: line.trim().slice(0, 200),
+    });
+  }
+  return {
+    found: matches.length > 0,
+    matches,
+    reason: matches.length
+      ? "评论区存在含自查结论与证据的评论：" + matches[0].snippet
+      : "评论区未找到同时包含自查动作、结论与证据的评论",
+  };
+}
+
+/** 列出当前单可用的流转（用于可选的“打回”流转） */
+export async function listTransitions(keyOrUrl, options = {}) {
+  const key = parseIssueKey(keyOrUrl);
+  if (!key) throw new Error("无法解析 Jira 问题 Key：" + keyOrUrl);
+  const data = await request("GET", "/rest/api/2/issue/" + encodeURIComponent(key) + "/transitions", options);
+  return ((data && data.transitions) || []).map((t) => ({ id: t.id, name: t.name, to: t.to ? t.to.name : "" }));
+}
+
+/**
+ * 执行一次流转，transition 可传流转名或 id。
+ * 默认不调用：只有 jira-config.json 显式配置了打回流转名时，技能才会调用本函数。
+ */
+export async function transitionIssue(keyOrUrl, transition, options = {}) {
+  const key = parseIssueKey(keyOrUrl);
+  if (!key) throw new Error("无法解析 Jira 问题 Key：" + keyOrUrl);
+  const wanted = String(transition || "").trim();
+  if (!wanted) throw new Error("缺少流转名称或 id");
+  const transitions = await listTransitions(key, options);
+  const target = transitions.find((t) => t.name === wanted || t.id === wanted || t.to === wanted);
+  if (!target) {
+    throw new Error("未找到流转：" + wanted + "；当前可用流转：" + transitions.map((t) => t.name).join("、"));
+  }
+  await request("POST", "/rest/api/2/issue/" + encodeURIComponent(key) + "/transitions", {
+    ...options,
+    body: { transition: { id: target.id } },
+  });
+  return { ok: true, key, transition: target };
+}
+
+/** 读取技能目录或 ~/.codex/jira/config.json，用于覆盖门禁字段名与打回流转 */
+export async function loadConfig() {
+  const fs = await import("node:fs");
+  const dir = skillDir();
+  const candidates = [];
+  if (dir) {
+    candidates.push(dir + "/jira-config.json");
+    candidates.push(dir + "/../../jira/config.json");
+  }
+  for (const file of candidates) {
+    try {
+      if (!fs.existsSync(file)) continue;
+      const cfg = JSON.parse(fs.readFileSync(file, "utf8"));
+      if (cfg && typeof cfg === "object") return { config: cfg, source: file };
+    } catch (e) { /* 忽略单个候选文件的读取错误 */ }
+  }
+  return { config: {}, source: null };
+}
+
+/** 从配置或默认候选中得到某个字段位的字段名列表 */
+function wantedNames(config, keys, fallback) {
+  for (const key of keys) {
+    if (config && config[key]) return [].concat(config[key]);
+  }
+  return fallback;
+}
+
+/** 定位门禁字段：返回 { fields, missing, configSource, totalFields } */
+export async function resolveGateFields(options = {}) {
+  const { config, source } = await loadConfig();
+  const wanted = {
+    result: wantedNames(config, ["gateResultField", "defectGateResultField"], DEFAULT_GATE_FIELD_NAMES.result),
+    selfCheck: wantedNames(config, ["gateSelfCheckField", "defectGateSelfCheckField"], DEFAULT_GATE_FIELD_NAMES.selfCheck),
+    report: wantedNames(config, ["gateReportField", "defectGateReportField"], DEFAULT_GATE_FIELD_NAMES.report),
+    checkedAt: wantedNames(config, ["gateCheckedAtField", "defectGateCheckedAtField"], DEFAULT_GATE_FIELD_NAMES.checkedAt),
+  };
+  const all = await request("GET", "/rest/api/2/field", options);
+  const byName = new Map();
+  for (const f of all) byName.set(String(f.name || "").trim(), f);
+  const fields = {};
+  const missing = [];
+  for (const slot of Object.keys(wanted)) {
+    const names = [].concat(wanted[slot] || []);
+    const found = names.map((name) => byName.get(String(name).trim())).find(Boolean);
+    if (found) fields[slot] = found;
+    else missing.push(names.join(" / "));
+  }
+  return { fields, missing, configSource: source, totalFields: all.length };
+}
+
+/**
+ * 把缺陷单预检结论回写为 Jira 字段，供工作流条件/校验器读取。
+ * payload: { result: "通过"|"不通过"|"未检查", selfCheck: "有"|"无", report: "文件名或链接", checkedAt: ISO }
+ * 字段不存在时返回 { skipped: true } 而不抛异常，便于优雅降级。
+ */
+export async function setGateResult(keyOrUrl, payload = {}, options = {}) {
+  const key = parseIssueKey(keyOrUrl);
+  if (!key) throw new Error("无法解析 Jira 问题 Key：" + keyOrUrl);
+  const { dryRun, ...rest } = options;
+  const { fields, missing } = await resolveGateFields(rest);
+  if (!fields.result) {
+    return {
+      ok: false,
+      skipped: true,
+      reason: "未找到门禁字段：" + missing.join("；"),
+      hint: "请由 Jira 管理员创建该字段，或在 jira-config.json 中用 gateResultField 指定实际字段名",
+    };
+  }
+  const isOption = (f) => !!f && !!f.schema && (f.schema.type === "option" || f.schema.type === "radiobuttons");
+  const body = {};
+  const put = (field, value) => {
+    if (!field || value === undefined || value === null || value === "") return;
+    body[field.id] = isOption(field) ? { value: String(value) } : String(value);
+  };
+  put(fields.result, payload.result);
+  put(fields.selfCheck, payload.selfCheck);
+  put(fields.report, payload.report);
+  if (fields.checkedAt) {
+    const iso = payload.checkedAt || new Date().toISOString();
+    const dateOnly = fields.checkedAt.schema && fields.checkedAt.schema.type === "date";
+    put(fields.checkedAt, dateOnly ? iso.slice(0, 10) : iso);
+  }
+  if (!Object.keys(body).length) return { ok: false, skipped: true, reason: "没有可写入的门禁字段值" };
+  if (dryRun) return { ok: true, dryRun: true, key, wouldWrite: body };
+  await request("PUT", "/rest/api/2/issue/" + encodeURIComponent(key), { ...rest, body: { fields: body } });
+  return { ok: true, key, written: body, missing };
+}
+
+/** 读取当前门禁字段值，用于写入后验证 */
+export async function getGateResult(keyOrUrl, options = {}) {
+  const key = parseIssueKey(keyOrUrl);
+  if (!key) throw new Error("无法解析 Jira 问题 Key：" + keyOrUrl);
+  const { fields, missing } = await resolveGateFields(options);
+  if (!fields.result) return { ok: false, skipped: true, reason: "未找到门禁字段：" + missing.join("；") };
+  const ids = ["result", "selfCheck", "report", "checkedAt"].filter((slot) => fields[slot]).map((slot) => fields[slot].id);
+  const data = await request("GET", "/rest/api/2/issue/" + encodeURIComponent(key) + "?fields=" + ids.join(","), options);
+  const read = (f) => {
+    if (!f) return null;
+    const v = data && data.fields ? data.fields[f.id] : null;
+    if (v === null || v === undefined) return null;
+    if (typeof v === "object") return v.value || v.name || JSON.stringify(v);
+    return v;
+  };
+  return {
+    ok: true,
+    key,
+    result: read(fields.result),
+    selfCheck: read(fields.selfCheck),
+    report: read(fields.report),
+    checkedAt: read(fields.checkedAt),
+  };
+}
+
+/** 自检：确认令牌、网络、账号与门禁字段可见性 */
+export async function selftest(options = {}) {
+  const result = { ok: false, steps: [] };
+  const cred = options.token ? { token: options.token, source: "argument" } : await resolveToken(null);
+  result.tokenSource = cred.source || null;
+  result.checkedPaths = cred.checked || null;
+  result.baseUrl = options.baseUrl || cred.baseUrl || DEFAULT_BASE_URL;
+  result.auth = String(cred.auth || "bearer").toLowerCase();
+  if (!cred.token) {
+    result.steps.push({ step: "读取令牌", ok: false, detail: "未找到令牌；请设置 JIRA_TOKEN 环境变量，或把令牌放到技能目录、~/.codex/jira-token.txt、~/.codex/jira/config.json" });
+    return result;
+  }
+  result.steps.push({ step: "读取令牌", ok: true, detail: cred.source });
+  try {
+    const info = await request("GET", "/rest/api/2/serverInfo", { baseUrl: result.baseUrl });
+    result.steps.push({ step: "访问 Jira", ok: true, detail: info.baseUrl + " v" + info.version });
+  } catch (e) {
+    result.steps.push({ step: "访问 Jira", ok: false, detail: e.message });
+    return result;
+  }
+  try {
+    const me = await myself({ baseUrl: result.baseUrl });
+    result.steps.push({ step: "校验令牌", ok: true, detail: me.displayName + "（" + me.name + "）" });
+    result.user = me.name;
+  } catch (e) {
+    // 部分站点禁止普通账号访问 /myself；只要站点可达就不要据此判定令牌失效。
+    result.steps.push({ step: "校验令牌", ok: false, detail: e.message });
+  }
+  result.ok = true;
+  return result;
+}

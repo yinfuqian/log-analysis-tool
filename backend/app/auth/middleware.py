@@ -6,6 +6,20 @@ from flask import g, jsonify, request
 
 ANONYMOUS_ENDPOINTS = {"auth.login", "auth.request_account", "health.live", "health.ready"}
 
+# 可用的接口令牌配置：(令牌键, 允许路径键, 调用方标识键, 默认调用方标识, 默认允许路径)。
+# 路径配置缺失时回落到默认允许路径，避免令牌意外获得全接口权限。
+# SKILL_API_TOKEN 面向外部系统调用技能接口；ANALYSIS_API_TOKEN 面向技能脚本回写故障分析。
+API_TOKEN_CONFIGS = (
+    ("SKILL_API_TOKEN", "SKILL_API_TOKEN_PATHS", "SKILL_API_USERNAME", "external-api", "/skill"),
+    (
+        "ANALYSIS_API_TOKEN",
+        "ANALYSIS_API_TOKEN_PATHS",
+        "ANALYSIS_API_USERNAME",
+        "analysis-skill",
+        "/analysis,/logfile,/product/get,/module/get,/module/search",
+    ),
+)
+
 
 class ExternalApiPrincipal:
     """外部系统通过接口令牌调用时使用的调用方标识。"""
@@ -40,18 +54,21 @@ def extract_api_token(headers):
 
 
 def match_api_token(app, path, headers):
-    """判断当前请求是否携带了可用于该路径的外部接口令牌。"""
-    configured = str(app.config.get("SKILL_API_TOKEN") or "")
-    if not configured:
-        return False
-    raw_paths = str(app.config.get("SKILL_API_TOKEN_PATHS") or "/skill")
-    allowed_paths = [item.strip() for item in raw_paths.split(",") if item.strip()]
-    if allowed_paths and not any(str(path or "").startswith(prefix) for prefix in allowed_paths):
-        return False
+    """判断当前请求是否携带了可用于该路径的接口令牌，命中时返回调用方标识。"""
     provided = extract_api_token(headers)
     if not provided:
-        return False
-    return secrets.compare_digest(provided, configured)
+        return None
+    for token_key, paths_key, username_key, fallback_username, default_paths in API_TOKEN_CONFIGS:
+        configured = str(app.config.get(token_key) or "")
+        if not configured:
+            continue
+        raw_paths = str(app.config.get(paths_key) or default_paths)
+        allowed_paths = [item.strip() for item in raw_paths.split(",") if item.strip()]
+        if allowed_paths and not any(str(path or "").startswith(prefix) for prefix in allowed_paths):
+            continue
+        if secrets.compare_digest(provided, configured):
+            return str(app.config.get(username_key) or fallback_username)
+    return None
 
 
 def install_authentication(app, session_service):
@@ -64,9 +81,10 @@ def install_authentication(app, session_service):
         if app.testing and app.config.get("AUTH_TEST_BYPASS"):
             return None
 
-        # 外部系统可使用独立接口令牌调用技能接口，避免与登录会话令牌混用。
-        if match_api_token(app, request.path, request.headers):
-            g.current_user = ExternalApiPrincipal(str(app.config.get("SKILL_API_USERNAME") or "external-api"))
+        # 外部系统与技能脚本可使用独立接口令牌调用指定接口，避免与登录会话令牌混用。
+        principal_username = match_api_token(app, request.path, request.headers)
+        if principal_username:
+            g.current_user = ExternalApiPrincipal(principal_username)
             g.auth_token = None
             return None
 

@@ -25,22 +25,38 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 WORKDIR /app
 
 # 系统镜像源和 Python 镜像源都允许在企业网络中通过构建参数替换。
-ARG APT_MIRROR=https://mirrors.aliyun.com/debian
+#ARG APT_MIRROR=https://mirrors.aliyun.com/debian
+ARG APT_MIRROR=http://mirrors.tuna.tsinghua.edu.cn/debian
+
 ARG PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
 # 附件解压工具随镜像一起发布，避免技能执行时再联网安装：bsdtar（libarchive）负责 RAR/7z 只读解压，
 # 7-Zip 系命令按发行版包名择优安装（bookworm 起部分版本改名为 7zip，因此两种包名都尝试）。
-RUN if [ -f /etc/apt/sources.list.d/debian.sources ]; then \
-        sed -i "s|http://deb.debian.org/debian|${APT_MIRROR}|g; s|http://security.debian.org/debian-security|${APT_MIRROR}-security|g" /etc/apt/sources.list.d/debian.sources; \
-    elif [ -f /etc/apt/sources.list ]; then \
-        sed -i "s|http://deb.debian.org/debian|${APT_MIRROR}|g; s|http://security.debian.org/debian-security|${APT_MIRROR}-security|g" /etc/apt/sources.list; \
-    fi \
-    && apt-get update \
-    && apt-get install -y --no-install-recommends git ca-certificates curl libgomp1 libgl1 libglib2.0-0 \
-    && apt-get install -y --no-install-recommends unzip libarchive-tools \
-    && (apt-get install -y --no-install-recommends p7zip-full \
-        || apt-get install -y --no-install-recommends 7zip \
-        || echo "提示：未安装 7-Zip 系命令，7z/rar 归档将由 bsdtar 处理") \
-    && rm -rf /var/lib/apt/lists/*
+# 该清单同时用于离线安装校验，改动后必须用 scripts/export_apt_offline_packages.ps1 重新导出离线 deb 包。
+ARG APT_PACKAGES="git ca-certificates curl libgomp1 libgl1 libglib2.0-0 unzip libarchive-tools p7zip-full 7zip"
+
+# 仓库内 backend/offline/apt/<发行版代号>-<架构> 预置了这些系统依赖的离线 deb 包：
+# 命中时完全本地安装，企业内网无 apt 源也能构建镜像；未命中时回退到在线镜像源安装。
+RUN --mount=type=bind,source=offline/apt,target=/opt/apt-offline \
+    set -eu; \
+    deb_dir="/opt/apt-offline/$(sed -n 's/^VERSION_CODENAME=//p' /etc/os-release)-$(dpkg --print-architecture)"; \
+    if [ -d "$deb_dir" ] && ls "$deb_dir"/*.deb >/dev/null 2>&1; then \
+        echo "使用仓库内离线 deb 包安装系统依赖：$deb_dir"; \
+        dpkg -i "$deb_dir"/*.deb; \
+    else \
+        echo "开始安装依赖" \
+        && if [ -f /etc/apt/sources.list.d/debian.sources ]; then \
+            sed -i "s|http://deb.debian.org/debian|${APT_MIRROR}|g; s|http://security.debian.org/debian-security|${APT_MIRROR}-security|g" /etc/apt/sources.list.d/debian.sources; \
+        elif [ -f /etc/apt/sources.list ]; then \
+            sed -i "s|http://deb.debian.org/debian|${APT_MIRROR}|g; s|http://security.debian.org/debian-security|${APT_MIRROR}-security|g" /etc/apt/sources.list; \
+        fi \
+        && apt-get update \
+        && apt-get install -y --no-install-recommends ${APT_PACKAGES} \
+        && echo "安装成功"; \
+    fi; \
+    rm -rf /var/lib/apt/lists/*; \
+    for package_name in ${APT_PACKAGES}; do \
+        dpkg-query -W "$package_name" >/dev/null 2>&1 || { echo "系统依赖安装失败：$package_name" >&2; exit 1; }; \
+    done
 
 FROM base AS build
 
@@ -49,7 +65,7 @@ COPY requirements.txt requirements-ocr.txt requirements-skill.txt ./
 RUN python -m pip install --upgrade pip \
     && python -m pip install -i "${PIP_INDEX_URL}" -r requirements.txt \
     && python -m pip install -i "${PIP_INDEX_URL}" -r requirements-ocr.txt \
-    && python -m pip install -i "${PIP_INDEX_URL}" -r requirements-skill.txt
+    && python -m pip install -i "${PIP_INDEX_URL}" -r req.uirements-skill.txt
 
 COPY . .
 

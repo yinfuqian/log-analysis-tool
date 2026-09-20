@@ -140,8 +140,8 @@ def _task_should_use_gpt_vision_fallback(image_ocr):
     data = image_ocr if isinstance(image_ocr, dict) else {}
     if str(data.get("engine") or "").strip().lower() == "gpt-vision":
         return False
-    enabled = str(os.getenv("LOCAL_OCR_ENABLED", "true")).strip().lower() not in {
-        "0", "false", "no", "off",
+    enabled = str(os.getenv("LOCAL_OCR_ENABLED", "false")).strip().lower() in {
+        "1", "true", "yes", "on",
     }
     if not enabled:
         return True
@@ -208,8 +208,8 @@ def build_image_ocr_log_content(data, input_paths, ocr_extractor=None, image_fal
     image_ocr_source = data.get("image_ocr")
     image_ocr = _normalize_task_image_ocr(image_ocr_source)
     has_supplied_ocr = isinstance(image_ocr_source, dict)
-    local_ocr_enabled = str(os.getenv("LOCAL_OCR_ENABLED", "true")).strip().lower() not in {
-        "0", "false", "no", "off",
+    local_ocr_enabled = str(os.getenv("LOCAL_OCR_ENABLED", "false")).strip().lower() in {
+        "1", "true", "yes", "on",
     }
 
     image_tag = str(data.get("image_tag") or "").strip()
@@ -252,7 +252,7 @@ def build_image_ocr_log_content(data, input_paths, ocr_extractor=None, image_fal
             except TypeError:
                 image_ocr = _normalize_task_image_ocr(ocr_extractor(input_paths))
             except Exception as exc:
-                logging.exception("Local OCR task fallback failed")
+                logging.exception("图片来源文字提取失败（本地 OCR 通道，默认已停用）")
                 image_ocr["warnings"].append(str(exc))
             if _task_should_use_gpt_vision_fallback(image_ocr):
                 gpt_result = _task_build_gpt_image_ocr_result(
@@ -512,7 +512,7 @@ def analyze_log_task(self, data):
                 image_analysis = normalize_image_analysis(
                     str(data.get("image_tag") or "").strip(),
                     {
-                        "summary": "本地 OCR 已识别图片文本" if extracted_text else "本地 OCR 未识别到文本，将使用原图继续分析",
+                        "summary": "图片识别模型已提取画面文本" if extracted_text else "图片识别模型未提取到文本，将保留原图继续分析",
                         "extracted_text": extracted_text,
                     },
                     image_description=str(data.get("image_description") or "").strip(),

@@ -49,7 +49,8 @@ x-backend-environment: &backend-environment
   OPENAI_REASONING_EFFORT: ${OPENAI_REASONING_EFFORT:-high}
   LOG_ERROR_CONTEXT_LINES: ${LOG_ERROR_CONTEXT_LINES:-10}
   LOG_CONTEXT_MAX_CHARS: ${LOG_CONTEXT_MAX_CHARS:-30000}
-  LOCAL_OCR_ENABLED: ${LOCAL_OCR_ENABLED:-true}
+  # 图片识别默认使用多模态模型，本地 PaddleOCR 通道默认停用（需离线预检时显式设为 true）。
+  LOCAL_OCR_ENABLED: ${LOCAL_OCR_ENABLED:-false}
   OCR_MIN_CONFIDENCE: ${OCR_MIN_CONFIDENCE:-0.45}
   # 技能执行（Codex Agent）相关配置。CODEX_BASE_URL/CODEX_API_KEY 为空时回退到 OPENAI_URL/OPENAI_KEY。
   # 技能目录与 CODEX_HOME 分离：技能由宿主机 ./skills 只读挂载，CODEX_HOME 用独立卷存放运行期状态。
@@ -59,6 +60,11 @@ x-backend-environment: &backend-environment
   # 外部调用令牌：默认值仅用于本地验证，生产环境请在 .env.production 中替换为随机强令牌。
   SKILL_API_TOKEN: ${SKILL_API_TOKEN:-local-dev-token}
   SKILL_URL_ALLOWED_HOSTS: ${SKILL_URL_ALLOWED_HOSTS:-jira.in.wezhuiyi.com}
+  # 技能脚本回写故障分析：生产使用宿主机网络，内部地址指向本机 api 端口。
+  ANALYSIS_API_BASE_URL: ${ANALYSIS_API_BASE_URL:-http://127.0.0.1:5000}
+  ANALYSIS_API_TOKEN: ${ANALYSIS_API_TOKEN:-local-dev-analysis-token}
+  ANALYSIS_API_TOKEN_PATHS: ${ANALYSIS_API_TOKEN_PATHS:-/analysis,/logfile,/product/get,/module/get,/module/search}
+  ANALYSIS_API_USERNAME: ${ANALYSIS_API_USERNAME:-analysis-skill}
   CODEX_BIN: ${CODEX_BIN:-codex}
   CODEX_MODEL: ${CODEX_MODEL:-codex/deepseek-flash}
   CODEX_MODEL_PROVIDER: ${CODEX_MODEL_PROVIDER:-skillrun}
