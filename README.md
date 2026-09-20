@@ -12,7 +12,7 @@
 - 用户由管理员维护 `users.csv`，应用热加载新增、禁用和立即下线状态。
 - 除登录和账号申请外，服务接口必须携带有效登录令牌。
 - 用户操作写入数据库审计表，便于按操作人和请求编号追踪。
-- 内置 Codex Agent 技能执行接口：提交 Jira 链接与 `skill_id`，由服务端跑技能完成需求准入检查并写回 Jira 评论。
+- 内置 Codex Agent 技能执行接口：提交 Jira 链接与 `skill_id`，由服务端跑技能完成需求准入检查，写回 Jira 评论、按需流转状态，并把 OpenSpec 评审报告上传成需求单附件。
 - Docker Compose 提供数据库迁移、API、Worker、前端和 OCR 运行环境，并可通过 `local-deps` Profile 启动本地 MySQL、Redis。
 
 ## 服务架构
@@ -283,7 +283,10 @@ powershell -ExecutionPolicy Bypass -File scripts\export_release_image.ps1 `
 
 系统内置技能执行能力：外部系统提交一个 Jira 链接与 `skill_id`，服务端在独立工作目录中启动 Codex CLI，
 加载 `skills/<skill_id>/SKILL.md`，由 Agent 按技能定义访问 Jira、执行检查并写回评论。当前内置技能为
-`jira-gate-1`（Jira 需求准入检查 G1，产出难度分级与达标结论，并把逐项打标记的检查项清单写入需求单评论）。
+`jira-gate-1`（Jira 需求准入检查 G1，产出难度分级与达标结论，把逐项打标记的检查项清单写入需求单评论；
+不达标时流转到「评审中」并在评论里 @ 流转人；最后调用 `review-jira-songlizhi` 生成 OpenSpec 评审报告，
+作为附件上传到需求单，文件名以「宋立志」结尾）与 `review-jira-songlizhi`（按 OpenSpec 好需求标准评审需求质量，
+产出 Markdown 报告，对 Jira 只读）。
 
 ### 接口一览
 
@@ -359,6 +362,8 @@ Codex 自己生成的状态文件全部落在 `codex-home` 卷（本地运行对
 ### 部署要点
 
 - 后端镜像已内置 Node.js 与 Codex CLI，构建参数为 `CODEX_CLI_VERSION` 与 `NPM_REGISTRY`。
+- 后端镜像已内置附件解压工具（`bsdtar`／`unzip`，以及按发行版可用的 7-Zip 系命令），技能执行时**不需要联网安装**；
+  构建阶段会校验这些命令存在，缺失会导致镜像构建失败。
 - `docker compose up -d --build` 会自动挂载 `./skills:/data/skills:ro`，并创建 `codex-home`、`skill-workspace` 等命名卷。
 - 首次部署后自检技能运行环境：
 

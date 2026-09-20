@@ -27,6 +27,8 @@ WORKDIR /app
 # 系统镜像源和 Python 镜像源都允许在企业网络中通过构建参数替换。
 ARG APT_MIRROR=https://mirrors.aliyun.com/debian
 ARG PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
+# 附件解压工具随镜像一起发布，避免技能执行时再联网安装：bsdtar（libarchive）负责 RAR/7z 只读解压，
+# 7-Zip 系命令按发行版包名择优安装（bookworm 起部分版本改名为 7zip，因此两种包名都尝试）。
 RUN if [ -f /etc/apt/sources.list.d/debian.sources ]; then \
         sed -i "s|http://deb.debian.org/debian|${APT_MIRROR}|g; s|http://security.debian.org/debian-security|${APT_MIRROR}-security|g" /etc/apt/sources.list.d/debian.sources; \
     elif [ -f /etc/apt/sources.list ]; then \
@@ -34,6 +36,10 @@ RUN if [ -f /etc/apt/sources.list.d/debian.sources ]; then \
     fi \
     && apt-get update \
     && apt-get install -y --no-install-recommends git ca-certificates curl libgomp1 libgl1 libglib2.0-0 \
+    && apt-get install -y --no-install-recommends unzip libarchive-tools \
+    && (apt-get install -y --no-install-recommends p7zip-full \
+        || apt-get install -y --no-install-recommends 7zip \
+        || echo "提示：未安装 7-Zip 系命令，7z/rar 归档将由 bsdtar 处理") \
     && rm -rf /var/lib/apt/lists/*
 
 FROM base AS build
@@ -90,6 +96,10 @@ COPY --from=build /app/start_worker.sh /app/start_worker.sh
 COPY --from=build /data/paddle-cache /data/paddle-cache
 
 RUN chmod +x /app/docker-entrypoint.sh /app/migrate_db.sh /app/start.sh /app/start_worker.sh \
+    && command -v bsdtar >/dev/null \
+    && command -v unzip >/dev/null \
+    && (command -v 7z >/dev/null || command -v 7zz >/dev/null || command -v 7za >/dev/null \
+        || echo "提示：镜像内没有 7-Zip 系命令，7z/rar 归档将由 bsdtar 处理") \
     && mkdir -p /data/upload /data/skills /data/codex /data/skill-workspace /app/app/logs /tmp/fault-analyzer-repos
 
 EXPOSE 5000

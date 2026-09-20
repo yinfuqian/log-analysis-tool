@@ -15,6 +15,10 @@
  *   node scripts/jira-cli.mjs reviews <KEY|URL>              # 查找历史复审评论
  *   node scripts/jira-cli.mjs gate-get <KEY|URL>             # 读取门禁字段
  *   node scripts/jira-cli.mjs gate-set <KEY|URL> --file <JSON>
+ *   node scripts/jira-cli.mjs transitions <KEY|URL>          # 列出当前可用的工作流流转
+ *   node scripts/jira-cli.mjs flow-owner <KEY|URL>           # 输出流转人与其 @ 写法
+ *   node scripts/jira-cli.mjs transition <KEY|URL> --to <目标状态>
+ *   node scripts/jira-cli.mjs attach <KEY|URL> <本地文件> [--name <附件名>]
  *
  * 令牌来源：--token 参数、JIRA_TOKEN 环境变量，或 jira.mjs 默认查找的令牌文件。
  */
@@ -39,7 +43,11 @@ const USAGE = `用法：
   node scripts/jira-cli.mjs comment-update <KEY|URL> <评论ID> --file <文件>
   node scripts/jira-cli.mjs reviews <KEY|URL>
   node scripts/jira-cli.mjs gate-get <KEY|URL>
-  node scripts/jira-cli.mjs gate-set <KEY|URL> --file <JSON文件>`;
+  node scripts/jira-cli.mjs gate-set <KEY|URL> --file <JSON文件>
+  node scripts/jira-cli.mjs transitions <KEY|URL>
+  node scripts/jira-cli.mjs flow-owner <KEY|URL>
+  node scripts/jira-cli.mjs transition <KEY|URL> --to <目标状态>
+  node scripts/jira-cli.mjs attach <KEY|URL> <本地文件> [--name <附件名>]`;
 
 
 /**
@@ -206,6 +214,33 @@ async function main() {
       requireArgs(positional, 1, "gate-set <KEY|URL> --file <JSON文件>");
       const payload = JSON.parse(readBody(options));
       console.log(JSON.stringify(await jira.setGateResult(positional[0], payload, callOptions), null, 2));
+      return;
+    }
+    case "transitions": {
+      requireArgs(positional, 1, "transitions <KEY|URL>");
+      console.log(JSON.stringify(await jira.listTransitions(positional[0], callOptions), null, 2));
+      return;
+    }
+    case "flow-owner": {
+      requireArgs(positional, 1, "flow-owner <KEY|URL>");
+      // 先取单子再解析人员字段，避免调用方重复请求；issue 不参与请求选项。
+      const issue = await jira.getIssue(positional[0], callOptions);
+      const owner = await jira.resolveFlowOwner(issue, callOptions);
+      console.log(JSON.stringify({ key: issue.key, status: issue.status, ...owner }, null, 2));
+      return;
+    }
+    case "transition": {
+      requireArgs(positional, 1, "transition <KEY|URL> --to <目标状态>");
+      const target = options.to || positional[1];
+      if (!target) throw new Error("缺少目标状态：请使用 --to <目标状态>");
+      console.log(JSON.stringify(await jira.transitionToStatus(positional[0], target, callOptions), null, 2));
+      return;
+    }
+    case "attach": {
+      requireArgs(positional, 2, "attach <KEY|URL> <本地文件> [--name <附件名>]");
+      const upload = { ...callOptions };
+      if (options.name) upload.name = options.name;
+      console.log(JSON.stringify(await jira.uploadAttachment(positional[0], positional[1], upload), null, 2));
       return;
     }
     default:

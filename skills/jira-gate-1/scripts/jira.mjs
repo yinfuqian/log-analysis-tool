@@ -170,8 +170,14 @@ export async function request(method, apiPath, options = {}) {
   if (cred.token) headers.Authorization = buildAuthHeader(cred);
   let payload;
   if (options.body !== undefined) {
-    headers["Content-Type"] = "application/json";
-    payload = typeof options.body === "string" ? options.body : JSON.stringify(options.body);
+    // FormData 用于附件上传：交给 fetch 自行生成 multipart 边界，不能手工设置 Content-Type。
+    const isFormData = typeof FormData !== "undefined" && options.body instanceof FormData;
+    if (isFormData) {
+      payload = options.body;
+    } else {
+      headers["Content-Type"] = "application/json";
+      payload = typeof options.body === "string" ? options.body : JSON.stringify(options.body);
+    }
   }
   const target = /^https?:\/\//i.test(apiPath) ? apiPath : baseUrl + apiPath;
   const res = await fetch(target, { method, headers, body: payload, redirect: "follow" });
@@ -529,6 +535,117 @@ export async function loadConfig() {
     } catch (e) { /* 忽略单个候选文件的读取错误 */ }
   }
   return { config: {}, source: null };
+}
+
+/** 读取该单当前可用的工作流流转（只读），返回 [{ id, name, to }] */
+export async function listTransitions(keyOrUrl, options = {}) {
+  const key = parseIssueKey(keyOrUrl);
+  if (!key) throw new Error(`无法从输入中解析 Jira 问题 Key：${keyOrUrl}`);
+  const data = await request("GET", `/rest/api/2/issue/${encodeURIComponent(key)}/transitions`, options);
+  const list = (data && Array.isArray(data.transitions)) ? data.transitions : [];
+  return list.map((item) => ({
+    id: item.id,
+    name: item.name,
+    to: item.to ? item.to.name : "",
+  }));
+}
+
+/**
+ * 解析「流转人」：默认取经办人（assignee），可在 jira-config.json 用 flowOwnerField 指定其他人员字段。
+ * 返回 { name, displayName, mention, field, source }；mention 为 Jira wiki 的 @ 写法，可直接拼进评论。
+ * 人员字段全部为空时返回 mention 为空串，由调用方决定是否省略 @。
+ */
+export async function resolveFlowOwner(issue, options = {}) {
+  const config = options.config || (await loadConfig()).config || {};
+  const preferred = String(config.flowOwnerField || "assignee").trim();
+  const order = [];
+  for (const name of [preferred, "assignee", "reporter", "creator"]) {
+    if (name && !order.includes(name)) order.push(name);
+  }
+  for (const field of order) {
+    const user = issue ? issue[field] : null;
+    if (user && user.name) {
+      return {
+        name: user.name,
+        displayName: user.displayName || user.name,
+        // Jira Server / Data Center 的 @ 人语法：按登录名引用，显示为用户全名。
+        mention: `[~${user.name}]`,
+        field,
+        source: field === preferred ? "配置或默认" : `回退到 ${field}`,
+      };
+    }
+  }
+  return { name: "", displayName: "", mention: "", field: "", source: null };
+}
+
+/**
+ * 把需求单流转到指定目标状态（例如「评审中」）。
+ * 已处于目标状态时直接跳过；找不到对应流转时返回可读原因而不是抛错，便于在未配置该流转的项目上优雅降级。
+ */
+export async function transitionToStatus(keyOrUrl, targetStatus, options = {}) {
+  const key = parseIssueKey(keyOrUrl);
+  if (!key) throw new Error(`无法从输入中解析 Jira 问题 Key：${keyOrUrl}`);
+  const target = String(targetStatus || "").trim();
+  if (!target) throw new Error("缺少目标状态名");
+  const issue = options.issue || await getIssue(keyOrUrl, options);
+  if (issue.status === target) {
+    return { ok: true, skipped: true, reason: "already-in-target", status: issue.status, target };
+  }
+  const available = await listTransitions(keyOrUrl, options);
+  // 按目标状态名匹配，而不是写死流转 id：不同项目/工作流的流转 id 与流转名都可能不同。
+  const match = available.find((item) => item.to === target) || available.find((item) => item.name === target);
+  if (!match) {
+    return { ok: false, reason: "no-transition", status: issue.status, target, available };
+  }
+  await request("POST", `/rest/api/2/issue/${encodeURIComponent(key)}/transitions`, {
+    ...options,
+    body: { transition: { id: match.id } },
+  });
+  return { ok: true, skipped: false, from: issue.status, to: target, transition: match.name, transitionId: match.id };
+}
+
+/**
+ * 把本地文件作为附件上传到需求单（POST /rest/api/2/issue/{KEY}/attachments）。
+ * name 默认取本地文件名，可用 options.name 指定 Jira 里的附件名（例如评审报告的规范文件名）。
+ * 本地文件缺失、权限不足（403）、该单未启用附件（404）时返回 { ok:false, reason } 而不抛错，便于优雅降级。
+ */
+export async function uploadAttachment(keyOrUrl, filePath, options = {}) {
+  const key = parseIssueKey(keyOrUrl);
+  if (!key) throw new Error(`无法从输入中解析 Jira 问题 Key：${keyOrUrl}`);
+  const fs = await import("node:fs");
+  const path = await import("node:path");
+  const absolute = filePath ? path.resolve(String(filePath)) : "";
+  if (!absolute || !fs.existsSync(absolute) || !fs.statSync(absolute).isFile()) {
+    return {
+      ok: false,
+      reason: "file-not-found",
+      file: String(filePath || ""),
+      hint: "本地文件不存在或不是普通文件，先确认报告已生成再上传",
+    };
+  }
+  const name = String(options.name || "").trim() || path.basename(absolute);
+  const form = new FormData();
+  // 附件内容以二进制读入，避免大文件被编码成字符串。
+  form.append("file", new Blob([fs.readFileSync(absolute)]), name);
+  try {
+    const data = await request("POST", `/rest/api/2/issue/${encodeURIComponent(key)}/attachments`, {
+      ...options,
+      body: form,
+    });
+    const first = Array.isArray(data) ? data[0] : data;
+    return {
+      ok: true,
+      id: first && first.id,
+      filename: (first && first.filename) || name,
+      size: first && first.size,
+      content: (first && first.content) || "",
+    };
+  } catch (err) {
+    const status = err && err.status;
+    // 403 通常是缺 CREATE_ATTACHMENTS 权限，404 通常是该单未启用附件或 Key 不存在。
+    const reason = status === 403 ? "forbidden" : status === 404 ? "not-found" : "http-error";
+    return { ok: false, reason, status: status || 0, name, message: String((err && err.message) || err) };
+  }
 }
 
 /** 定位门禁字段：按候选名精确匹配，返回 { fields, missing, configSource } */

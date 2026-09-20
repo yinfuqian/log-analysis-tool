@@ -74,3 +74,5 @@ skills/jira-token.txt
 skills/**/.jira-token
 skills/**/.jira-token.txt
 skill-workspace/
+# review-jira-req 技能在本地跑时会把中间草稿与评审报告写到当前目录的 reports/ 下
+reports/

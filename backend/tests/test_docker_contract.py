@@ -74,6 +74,18 @@ class DockerContractTests(unittest.TestCase):
         self.assertIn("*.sh text eol=lf", attributes)
         self.assertIn("find /app -type f -name '*.sh' -exec sed -i 's/\\r$//' {} +", dockerfile)
 
+    def test_backend_image_ships_attachment_unpack_tools(self):
+        """解压工具必须随镜像发布，避免技能执行时再联网安装。"""
+        dockerfile = (PROJECT_ROOT / "backend" / "Dockerfile").read_text(encoding="utf-8")
+
+        # bsdtar（libarchive-tools）负责 RAR/7z，unzip 兜底 zip；7-Zip 系命令按发行版包名择一安装。
+        self.assertIn("unzip libarchive-tools", dockerfile)
+        self.assertIn("p7zip-full", dockerfile)
+        self.assertIn("7zip", dockerfile)
+        # 构建期断言：镜像里必须真的能调用这几个命令，否则构建直接失败。
+        self.assertIn("command -v bsdtar >/dev/null", dockerfile)
+        self.assertIn("command -v unzip >/dev/null", dockerfile)
+
 
 if __name__ == "__main__":
     unittest.main()

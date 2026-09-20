@@ -44,17 +44,24 @@ SINGLE_COMPRESS_MODULES = {".gz": gzip, ".bz2": bz2, ".xz": lzma}
 STRIP_SUFFIXES = TAR_LIKE_SUFFIXES + (".zip", ".rar", ".7z", ".gz", ".bz2", ".xz")
 
 # rar / 7z 没有可用的纯 Python 解压实现，按顺序尝试系统命令。
-# Windows 10+ 自带的 bsdtar（tar.exe）实测能解 RAR5，是没装 7-Zip / WinRAR 时的主力方案。
+# 服务端镜像已预装 bsdtar（libarchive-tools）与 7-Zip 系命令，因此容器内无需联网安装即可解压；
+# Windows 10+ 自带的 bsdtar 命令名是 tar.exe，作为桌面端兜底同样支持 RAR5。
+# 顺序按“容器内已装且成功率最高”排列：bsdtar 先解 rar（实测支持 RAR5），7z 负责 7z 格式。
 EXTERNAL_UNPACKERS = {
     "rar": (
-        ("tar", ["-xf", "{archive}", "-C", "{dest}"]),
+        ("bsdtar", ["-xf", "{archive}", "-C", "{dest}"]),
         ("7z", ["x", "-y", "-o{dest}", "{archive}"]),
+        ("7zz", ["x", "-y", "-o{dest}", "{archive}"]),
         ("7za", ["x", "-y", "-o{dest}", "{archive}"]),
+        ("unar", ["-q", "-o", "{dest}", "{archive}"]),
         ("unrar", ["x", "-o+", "{archive}", "{dest}"]),
+        ("tar", ["-xf", "{archive}", "-C", "{dest}"]),
     ),
     "7z": (
         ("7z", ["x", "-y", "-o{dest}", "{archive}"]),
+        ("7zz", ["x", "-y", "-o{dest}", "{archive}"]),
         ("7za", ["x", "-y", "-o{dest}", "{archive}"]),
+        ("bsdtar", ["-xf", "{archive}", "-C", "{dest}"]),
         ("tar", ["-xf", "{archive}", "-C", "{dest}"]),
     ),
 }
@@ -283,7 +290,9 @@ def _unpack_external(kind, path, dest_dir):
             return True, label
         detail = (proc.stderr or proc.stdout or "").strip().replace("\n", " ")[:200]
         errors.append(f"{label}=退出码 {proc.returncode}: {detail}")
-    return False, "；".join(errors) or "没有可用的解压命令"
+    detail = "；".join(errors) or "没有可用的解压命令"
+    # 服务端镜像已预装解压工具，出现该提示通常意味着换了运行环境，而不是需要现场安装。
+    return False, f"{detail}（容器镜像已预装 bsdtar 与 7-Zip；请勿在任务中安装软件，缺少工具时如实报告）"
 
 
 def unpack_archive(path, dest_dir, kind):

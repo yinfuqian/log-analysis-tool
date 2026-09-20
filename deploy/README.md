@@ -73,6 +73,9 @@ docker load -i fault-analysis-backend-2026.07.18-1.tar
 1. 后端镜像需为包含 Codex CLI 的版本（`docker compose ... pull` 拉取最新镜像即可）。
 2. 将本包的 `skills/` 目录上传到 Compose 文件同级目录，容器会把它**只读**挂载到 `/data/skills`；目录缺失时 `/skill/list` 返回空列表。
 
+镜像内已预装附件解压工具（`bsdtar`、`unzip` 及可用的 7-Zip 系命令）与 Python/Node 依赖，
+技能执行过程中不需要联网安装任何软件；如需确认，可在容器内执行 `docker compose ... exec worker sh -c "command -v bsdtar unzip 7z"`。
+
 技能运行参数（模型、中转地址、请求协议、推理强度）由后端以 `codex exec -c ...` 传入，容器内不需要维护 `config.toml`；
 Codex 自身的状态库（`state_*.sqlite` 等）写在 `codex-home` 命名卷中，不会落到宿主机目录。需要附加 Codex 配置时用
 `CODEX_EXTRA_ARGS` 追加，例如 `CODEX_EXTRA_ARGS=-c model_context_window=128000`。

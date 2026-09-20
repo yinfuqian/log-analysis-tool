@@ -52,10 +52,13 @@
 | 当前账号（校验令牌） | `GET /rest/api/2/myself` |
 | 需求单全量字段 | `GET /rest/api/2/issue/{KEY}?expand=names,renderedFields,schema` |
 | 当前用户对某单的权限（写评论前预检） | `GET /rest/api/2/mypermissions?issueKey={KEY}` |
+| 当前可用的工作流流转（只读） | `GET /rest/api/2/issue/{KEY}/transitions` |
+| 执行流转 | `POST /rest/api/2/issue/{KEY}/transitions`，Body `{"transition":{"id":"<流转id>"}}` |
 | 按父单查子任务 | `GET /rest/api/2/search?jql=parent%20%3D%20{KEY}` |
 | 全部评论（超过一页时） | `GET /rest/api/2/issue/{KEY}/comment` |
 | 写评论 | `POST /rest/api/2/issue/{KEY}/comment`，Body `{"body":"..."}` |
 | 改评论 | `PUT /rest/api/2/issue/{KEY}/comment/{id}` |
+| 上传附件 | `POST /rest/api/2/issue/{KEY}/attachments`，`multipart/form-data`，字段名 `file`（可带 `filename`） |
 | 附件下载 | `GET {attachment.content}`，需带同一认证头 |
 
 固定请求头：`Accept: application/json`、`X-Atlassian-Token: no-check`。
@@ -90,7 +93,7 @@ Jira 错误响应形如 `{"errorMessages":["..."],"errors":{...}}`，`jira.mjs` 
 4. **浏览器访问 `/rest/...` 会被拦截**（`net::ERR_BLOCKED_BY_CLIENT`），浏览器通道只能读页面和写评论，不能直接调 API。
 5. **`mypermissions` 的 `permissions` 过滤参数在本站会被忽略**，接口会返回全量权限列表；从中读 `ADD_COMMENTS`、`EDIT_ISSUES`、`TRANSITION_ISSUES` 即可。
 6. **压缩包附件必须"先解压再解析"**。需求单常把 PRD / 原型 / Overview 打包成 `.rar` 或 `.zip`，直接解析压缩包只会得到乱码或"无法解析"。`extract.py` 会自动识别 `.zip / .rar / .7z / .tar / .tar.gz / .tgz / .gz / .bz2 / .xz`，解压到附件目录下的 `__unpacked\` 后递归解析，输出用 `压缩包名/内部路径` 标注来源。
-   `.rar` 没有可用的纯 Python 实现，本机也常缺 WinRAR / 7-Zip：脚本按 `tar`（Windows 自带 bsdtar，实测支持 RAR5）→ `7z` → `7za` → `unrar` 顺序降级。实测 CALL-1941 的 `.rar` 三件套（PRD_DELIVERY / Prototype / Overview）可正常解出，中文目录名正常。
+   `.rar` 没有可用的纯 Python 实现，因此按系统命令降级：`bsdtar`（libarchive，实测支持 RAR5）→ `7z` → `7zz` → `7za` → `unar` → `unrar` → `tar`（Windows 桌面端的 bsdtar 命令名就是 `tar`）。服务端镜像已预装 `bsdtar` 与 7-Zip 系命令，**不需要也不允许在任务中联网安装**。实测 CALL-1941 的 `.rar` 三件套（PRD_DELIVERY / Prototype / Overview）可正常解出，中文目录名正常。
    解压失败时输出 `[压缩包解压失败]` 并列出尝试过的命令与报错，**此时必须记为"附件无法解析"，不能当成"附件没有内容"，也不要臆测包内内容**。
    同一目录内的 `__unpacked` 在遍历时会被跳过，不会重复解析；同名解压结果自动加 `-2` 后缀，不覆盖上一次结果。
 
@@ -105,10 +108,15 @@ nodeRepl.write(["ADD_COMMENTS", "EDIT_ISSUES", "TRANSITION_ISSUES"].map(n => `${
 
 实测 `ZY20260061-3343`：`ADD_COMMENTS=true`、`EDIT_ISSUES=true`、`TRANSITION_ISSUES=true`。若 `ADD_COMMENTS=false`，不要反复重试，直接告知用户缺少评论权限。
 
+`TRANSITION_ISSUES` 是「不达标时流转到评审中」所需的权限。为 `false` 时**跳过流转动作**，评论里写「未流转（缺少流转权限）」，同样不要反复重试。
+
+`CREATE_ATTACHMENTS` 是「上传评审报告附件」所需的权限（见 §10）。为 `false` 时跳过上传，并在对话里如实说明缺权限。
+
 ## 8. 评论写入实操
 
 - 评论模板与 Jira wiki 标记对照见 `SKILL.md`「输出模板」节；**评论正文用 Jira wiki 标记，不要提交 Markdown 表格**，否则会显示成原始符号。
 - 评论只列检查点：一行难度结论 + 检查项清单；每项行首必须有标记——通过写 `(/)`（绿勾），不通过写 `(x)`（红叉）。不通过项每条一行、80 字以内；判定过程与难度维度留在对话回复里。
+- 不达标时元信息区多一行「待处理人」：`* 待处理人：[~登录名]｜流转：<实际流转结果>`，`@` 写法见 §9。
 - 写入后读回验证，确认渲染正常、无截断：
 
 ```javascript
@@ -122,7 +130,48 @@ nodeRepl.write(last.id + " | " + last.author + " | " + last.body.slice(0, 120));
 - 评论正文中避免出现未转义的花括号组合（`{color}` 之类会被当作宏）。
 - 结论只以评论留痕，不生成报告文档；本地仅保留附件与解析中间文件。
 
-## 9. 故障排查
+## 9. 不达标时的流转与 @ 流转人
+
+仅在 AI 预检结论为**不达标**时执行；结论达标时不动状态、也不 @ 人。
+
+1. **流转人从哪来**：本站在 `/rest/api/2/field` 里没有名为「流转人」的字段（实测名字含「流转」的字段为 0 个），因此本技能已确认的口径是**取经办人 `assignee`**；仅在经办人为空时才按 `assignee → reporter → creator` 回退，回退取到时对话摘要里要写明实际来源（`resolveFlowOwner()` 返回的 `source` 字段会标明）。需要长期换口径时在技能目录的 `jira-config.json`（即仓库 `skills/jira-gate-1/jira-config.json`，随技能目录挂载进容器）里用 `flowOwnerField` 指定人员字段名，**不要改脚本**。
+2. **@ 写法**：Jira Server / DC 按登录名引用，`[~liu.huan]` 渲染为「刘欢」。`resolveFlowOwner()` 直接返回拼好的 `mention`；实测 `flow-owner ZYSQ-95` → `{"name":"liu.huan","displayName":"刘欢","mention":"[~liu.huan]","field":"assignee"}`。
+3. **目标状态固定为「评审中」**（实测站点状态清单里存在该状态）。**不要写死流转 id**：不同项目工作流的流转 id 与流转名都可能不同，`transitionToStatus()` 按目标状态名匹配（先比 `to`，再比 `name`）。
+
+```bash
+node scripts/jira-cli.mjs transitions <KEY|URL>             # 只读：看当前可用流转
+node scripts/jira-cli.mjs flow-owner <KEY|URL>              # 只读：看流转人与 @ 写法
+node scripts/jira-cli.mjs transition <KEY|URL> --to 评审中   # 执行流转
+```
+
+4. **匹配不到流转时不抛错**：返回 `{ok:false, reason:"no-transition", status, target, available}`，`available` 是当前可用流转列表。实测 `CALL-1446` 只有 `To Do→待办`、`初步处理→完成`、`跟进需求→需求澄清` 三条，**没有「评审中」**——这类单子按 `SKILL.md` §9 记「未流转（该单当前状态无「评审中」流转）」，并在对话里列出 `available` 交人工处理，不要改用其他状态。
+5. 已在目标状态时返回 `{ok:true, skipped:true, reason:"already-in-target"}`，不重复发起流转。
+6. 写评论、回写门禁字段、流转的顺序固定为：**评论（含 @）→ 门禁字段 → 流转**，流转放最后。
+
+## 10. 评审报告附件上传
+
+需求质量的细读结论由同仓库技能 `review-jira-songlizhi` 产出（对 Jira 只读），本技能负责把它的 Markdown 报告上传成需求单附件。
+
+1. **技能位置**：容器内 `/data/skills/review-jira-songlizhi`（随 `skills/` 只读挂载）；桌面端为 `<仓库>/skills/review-jira-songlizhi`。执行它的流水线前先做凭据桥接——它读 `JIRA_PAT`，容器里注入的是 `JIRA_TOKEN`：
+
+```bash
+export SKILL_DIR=/data/skills/review-jira-songlizhi
+export JIRA_PAT="$JIRA_TOKEN"
+export JIRA_BASE_URL="${JIRA_BASE_URL:-https://jira.in.wezhuiyi.com}"
+```
+
+2. **流水线**：`bin/jira-fetch.mjs`（拉取，只读 GET）→ 归一化草稿 → `bin/rulecheck.mjs`（12 条规则）→ 语义评审 + `bin/verify-semantic-quotes.mjs`（引用逐字自检）→ `bin/report.mjs`（输出 `reports/review-report-<时间戳>.md`）。产物落在技能工作区，不写进只读的技能目录。
+3. **附件命名**：`<KEY>-需求评审报告-宋立志.md`，**必须以「宋立志」结尾**。报告脚本自带时间戳文件名，上传时用 `--name` 改成规范名。
+4. **上传**：`jira.mjs` 的 `uploadAttachment()` 用 `multipart/form-data` 提交，字段名固定为 `file`；**不要手工设置 `Content-Type`**，边界由 `fetch` 生成（`request()` 已对 `FormData` 特判）。Node 20 起 `FormData` / `Blob` 是全局对象，容器内可用。
+
+```bash
+node scripts/jira-cli.mjs attach <KEY|URL> "<报告路径>" --name "<KEY>-需求评审报告-宋立志.md"
+```
+
+5. **降级**：本地文件缺失、403（缺 `CREATE_ATTACHMENTS`）、404（该单未启用附件）、网络错误都返回 `{ok:false, reason}` 而不抛错：**跳过上传并如实说明，不要重试、不要改文件名绕开**。
+6. **顺序**：评论 → 门禁字段 → 流转状态（仅不达标）→ 上传附件。附件放最后，前序步骤的留痕不因附件失败而回滚。
+
+## 11. 故障排查
 
 | 现象 | 原因与处理 |
 |---|---|
@@ -131,19 +180,27 @@ nodeRepl.write(last.id + " | " + last.author + " | " + last.body.slice(0, 120));
 | `HTTP 401 必须登录` | 令牌缺失/失效，或访问了非公开项目；先 `selftest()`，必要时用浏览器通道 |
 | `HTTP 403` 且带 XSRF 提示 | 缺 `X-Atlassian-Token: no-check` 头 |
 | 附件下载 404 | 单子里的附件已被删除；按"附件缺失"记录，不要静默跳过 |
-| 输出里有 `[压缩包解压失败]` | 本机没有可用解压命令；如实记为"附件无法解析"，并请产品经理直接上传解压后的文件 |
+| 输出里有 `[压缩包解压失败]` | 运行环境缺少可用解压命令（镜像异常或换了非容器环境）；如实记为"附件无法解析"并报告，不要自行安装软件，也不要臆测包内内容 |
 | 评论数与 `fields.comment.total` 不一致 | `getIssue()` 会自动再拉一次 `/comment` 全量接口 |
+| `{ok:false, reason:"no-transition"}` | 当前状态没有通向目标状态的流转；按返回的 `available` 如实记录，不要改用其他状态 |
+| 流转返回 403 | 缺 `TRANSITION_ISSUES` 权限；跳过流转，评论里写「未流转（缺少流转权限）」 |
+| `[~xxx]` 没有渲染成 @ 人 | 用户名写成了显示名；要用**登录名**（如 `liu.huan`），可用 `flow-owner` 直接取 `mention` |
+| 上传返回 `reason:"forbidden"` | 缺 `CREATE_ATTACHMENTS` 权限；跳过上传并说明，不要重试 |
+| 上传返回 `reason:"not-found"` | 该单未启用附件或单号不对；如实说明 |
+| 上传返回 `reason:"file-not-found"` | 报告 md 没生成成功；回到 `report.mjs` 那一步核对路径 |
+| 上传报 `Content-Type` 相关 400/415 | 手工设置了 multipart 的 `Content-Type`；改为让 `fetch` 自动生成边界 |
+| `JIRA_PAT` 缺失导致 review-jira-songlizhi 直接退出 | 忘了凭据桥接；见 §10 的 `export JIRA_PAT="$JIRA_TOKEN"` |
 
-## 10. 门禁字段与工作流门禁（Jira 管理端配置）
+## 12. 门禁字段与工作流门禁（Jira 管理端配置）
 
-### 10.1 为什么不能在工作流里直接调 AI
+### 12.1 为什么不能在工作流里直接调 AI
 
 工作流校验器/条件必须是**同步、确定性、亚秒级**的；AI 预检是异步、非确定性的，还要读附件。因此正确架构是两段式：
 
 1. **AI 预检**（本 skill）：读需求单 → 判定 → 写评论 → 用 `setGateResult()` 把结论回写到 Jira 字段。
 2. **工作流门禁**（Jira 配置）：流转校验只读那个字段，不调用 AI。
 
-### 10.2 需要 Jira 管理员做的事
+### 12.2 需要 Jira 管理员做的事
 
 用管理员账号（本 skill 的令牌**没有**管理员权限，做不了这三件事）：
 
@@ -168,7 +225,7 @@ nodeRepl.write(last.id + " | " + last.author + " | " + last.body.slice(0, 120));
 
   推荐 **B**（能告诉用户为什么不能流转，整改闭环更短）；两种都不影响 REST 与批量流转路径，因为条件和校验器在所有路径上都会执行。
 
-### 10.3 两个必须堵的漏洞
+### 12.3 两个必须堵的漏洞
 
 1. **结论可被手工绕过**：任何有「编辑问题」权限的人都能把 `G1准入结论` 手动改成 `通过`。
    - 轻量缓解：字段配置里把 `G1准入结论` 设为只读，让 UI 改不了（REST 仍可写，需实测确认）。
@@ -176,19 +233,37 @@ nodeRepl.write(last.id + " | " + last.author + " | " + last.body.slice(0, 120));
 2. **结论会过期**：AI 判完 `通过` 后，产品经理又改了 PRD 或换了附件，字段仍挂着 `通过`。
    - 缓解：用 ScriptRunner 监听器（Issue Updated），在**附件增删改或描述变更**时把 `G1准入结论` 重置为 `未检查`，强制重新预检。
 
-### 10.4 其他运营建议
+### 12.4 其他运营建议
 
 - **保留人工豁免通道**：加 `豁免` 取值，只允许产品架构师角色设置，避免 AI 误判把需求彻底卡死。
 - **先观察再收紧**：建议先用方案 B 的「警告模式」跑 1~2 个迭代，统计误判率，再切成硬门禁。
 - **难度可以联动**：`G1需求难度 = 高` 时可额外要求技术方案评审，或多挂一个校验条件。
 
-### 10.5 相关函数
+### 12.5 相关函数
 
 ```javascript
 const rf = await j.resolveGateFields();     // 探测字段是否存在：{ fields, missing, configSource }
 const g  = await j.getGateResult("CALL-1940");  // 读回当前值
 const r  = await j.setGateResult("CALL-1940", { result: "不通过", difficulty: "高" });
 const d  = await j.setGateResult("CALL-1940", { result: "通过" }, { dryRun: true });  // 只算不写
+```
+
+不达标时的流转相关函数：
+
+```javascript
+const ts = await j.listTransitions("CALL-1446");                 // 当前可用流转 [{id, name, to}]
+const fo = await j.resolveFlowOwner(issue);                      // 流转人与 @ 写法 {name, mention, field}
+const tr = await j.transitionToStatus("ZYSQ-95", "评审中");       // 流转；失败时返回 ok:false 而不抛错
+```
+
+评审报告附件：
+
+```javascript
+const up = await j.uploadAttachment("CALL-1940", "reports/review-report-20260920-101530.md", {
+  name: "CALL-1940-需求评审报告-宋立志.md",
+});
+// 成功：{ ok:true, id, filename, size, content }
+// 失败：{ ok:false, reason:"forbidden|not-found|file-not-found|network-error", status, message }
 ```
 
 - `setGateResult()` 在字段不存在时返回 `{ ok:false, skipped:true, reason, hint }`，**不抛异常**，便于优雅降级。
