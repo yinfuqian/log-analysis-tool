@@ -332,7 +332,7 @@ curl -X POST http://127.0.0.1:5000/skill/run \
   -H "X-API-Token: <SKILL_API_TOKEN>" \
   -H "Content-Type: application/json" \
   -d '{
-        "skill_id": "jira-defect-gate",
+        "skill_id": "jira-gate-bug",
         "jira_url": "https://jira.in.wezhuiyi.com/browse/KEY-1234",
         "inputs": {"product": "客户服务", "module": "工单管理", "tagVersion": "v3.2.1"}
       }'
@@ -367,7 +367,7 @@ curl -H "X-API-Token: <SKILL_API_TOKEN>" http://127.0.0.1:5000/skill/task/SKL-8F
 | `SKILL_API_TOKEN` | `local-dev-token` | 外部系统调用 `/skill` 接口的独立令牌；默认值仅供本地验证，生产环境必须替换为随机强令牌 |
 | `SKILL_URL_ALLOWED_HOSTS` | `jira.in.wezhuiyi.com` | `jira_url` 主机白名单，逗号分隔；留空表示不限制 |
 | `SKILL_WORKSPACE_DIR` | `/data/skill-workspace` | 技能工作目录 |
-| `CODEX_SKILL_TIMEOUT` | `1800` | 单次技能执行超时秒数；`jira-defect-gate` 还要等故障分析完成，建议生产环境提高到 `3600` |
+| `CODEX_SKILL_TIMEOUT` | `1800` | 单次技能执行超时秒数；`jira-gate-bug` 还要等故障分析完成，建议生产环境提高到 `3600` |
 | `CODEX_MODEL` | `codex/deepseek-flash` | Codex 使用的模型 |
 | `CODEX_MODEL_PROVIDER` | `skillrun` | 模型提供方标识，后端以 `-c model_provider=...` 传给 Codex |
 | `CODEX_BASE_URL` | `https://newapi.in.wezhuiyi.com/v1` | 模型中转地址；未配置时回退 `OPENAI_URL` |
@@ -380,7 +380,7 @@ curl -H "X-API-Token: <SKILL_API_TOKEN>" http://127.0.0.1:5000/skill/task/SKL-8F
 | `SKILLS_DIR` | `/data/skills` | 技能目录，容器内由 `./skills` 只读挂载而来，Codex 运行时不会改写它 |
 | `JIRA_TOKEN` | 无（**必填**） | 注入给技能脚本的 Jira 个人访问令牌；也可把令牌文件放到 `skills/.jira-token` |
 | `JIRA_BASE_URL` | `https://jira.in.wezhuiyi.com` | 注入给技能脚本的 Jira 站点地址 |
-| `ANALYSIS_API_BASE_URL` | `http://api:5000` | `jira-defect-gate` 回写时调用的本服务地址（宿主网络改为 `http://127.0.0.1:5000`） |
+| `ANALYSIS_API_BASE_URL` | `http://api:5000` | `jira-gate-bug` 回写时调用的本服务地址（宿主网络改为 `http://127.0.0.1:5000`） |
 | `ANALYSIS_API_TOKEN` | `local-dev-analysis-token` | 技能脚本调用 `/analysis`、`/logfile` 等接口的内部令牌；生产环境必须替换 |
 
 技能运行参数由后端以 `codex exec -c ...` 传入（模型、中转地址、请求协议、推理强度等），容器内无需维护 `config.toml`；
@@ -454,9 +454,9 @@ ANALYSIS_API_TOKEN=local-dev-analysis-token
 
 ```powershell
 node ..\skills\jira-gate-1\scripts\jira-cli.mjs selftest
-node ..\skills\jira-defect-gate\scripts\jira-cli.mjs selftest
-node ..\skills\jira-defect-gate\scripts\analysis-cli.mjs selftest
-node ..\skills\jira-defect-gate\scripts\analysis-cli.mjs resolve --product yibot --module yibot-server
+node ..\skills\jira-gate-bug\scripts\jira-cli.mjs selftest
+node ..\skills\jira-gate-bug\scripts\analysis-cli.mjs selftest
+node ..\skills\jira-gate-bug\scripts\analysis-cli.mjs resolve --product yibot --module yibot-server
 curl -H "X-API-Token: local-dev-token" http://127.0.0.1:5000/health/ready
 curl -H "X-API-Token: local-dev-token" http://127.0.0.1:5000/skill/list
 ```
@@ -464,13 +464,13 @@ curl -H "X-API-Token: local-dev-token" http://127.0.0.1:5000/skill/list
 只想看 HTML 报告的排版、不想真的跑一次分析时，可以用既有结果 JSON 直接渲染，不访问网络：
 
 ```powershell
-node ..\skills\jira-defect-gate\scripts\analysis-cli.mjs render --input <结果JSON> --out 报告.html
+node ..\skills\jira-gate-bug\scripts\analysis-cli.mjs render --input <结果JSON> --out 报告.html
 ```
 
 **验证注意事项**
 
 - `jira-gate-1` 在达标与不达标两种情况下都会**真实写入 Jira 评论**（内容是逐项打标记的检查项清单）。本地验证请使用测试单或临时项目单，不要拿正式需求单试跑。
-- `jira-defect-gate` 同样会真实写评论；没有自查结果时还会上传 HTML 报告附件并消耗一次完整的故障分析（拉代码 + 模型推理）。本地验证请使用测试缺陷单。
+- `jira-gate-bug` 同样会真实写评论；没有自查结果时还会上传 HTML 报告附件并消耗一次完整的故障分析（拉代码 + 模型推理）。本地验证请使用测试缺陷单。
 - 异步分析依赖 Redis：`/health/ready` 的 `checks.redis` 必须是 `ok`，否则 `/analysis/submit_async` 无法入队（技能第 3 步会失败）。上传与分析提交本身不依赖 Redis 之外的组件。
 - 未配置 `LOCAL_OCR_ENABLED=true` 时图片识别走多模态模型；本地 `.env` 若仍写着 `true`，可用会话变量覆盖（`$env:LOCAL_OCR_ENABLED = "false"`），根 `.env` 的值不会覆盖已有环境变量。
 - 想先验证链路而不碰 Jira，可临时新建一个只回复结论的测试技能目录，并把 `SKILLS_DIR` 指向该目录。

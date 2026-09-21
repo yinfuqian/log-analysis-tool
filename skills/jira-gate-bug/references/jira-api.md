@@ -1,6 +1,6 @@
 # Jira 取数与写回细节（缺陷单门禁）
 
-面向 `jira-defect-gate` skill 的实现说明。基础地址：`https://jira.in.wezhuiyi.com`（Jira 10.3.9 Server / Data Center）。
+面向 `jira-gate-bug` skill 的实现说明。基础地址：`https://jira.in.wezhuiyi.com`（Jira 10.3.9 Server / Data Center）。
 
 ## 1. 运行通道
 

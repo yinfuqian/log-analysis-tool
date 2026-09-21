@@ -1,4 +1,4 @@
-"""缺陷单门禁技能测试：覆盖技能发现、交付物契约与脚本行为（HTML 报告、自查结果判定）。"""
+"""缺陷单门禁技能（jira-gate-bug）测试：覆盖技能发现、交付物契约与脚本行为（HTML 报告、自查结果判定）。"""
 import json
 import shutil
 import subprocess
@@ -13,7 +13,7 @@ if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
 SKILLS_DIR = BACKEND_DIR.parent / "skills"
-SKILL_DIR = SKILLS_DIR / "jira-defect-gate"
+SKILL_DIR = SKILLS_DIR / "jira-gate-bug"
 NODE_BIN = shutil.which("node")
 
 
@@ -47,8 +47,8 @@ class DefectGateSkillDefinitionTests(unittest.TestCase):
 
         skills = {skill.skill_id: skill for skill in list_skills(SKILLS_DIR)}
 
-        self.assertIn("jira-defect-gate", skills)
-        skill = skills["jira-defect-gate"]
+        self.assertIn("jira-gate-bug", skills)
+        skill = skills["jira-gate-bug"]
         self.assertTrue(skill.description)
         self.assertEqual(skill.required_inputs, ("jira_url",))
         self.assertEqual(skill.timeout_seconds, 3600)
