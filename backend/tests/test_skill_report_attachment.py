@@ -1,5 +1,8 @@
 """评审报告附件契约测试：锁定 review-jira-songlizhi 的引入方式与附件命名规则。"""
+import shutil
+import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -124,6 +127,93 @@ class ReportAttachmentContractTests(unittest.TestCase):
         self.assertIn("* 报告附件：{{<KEY>-需求评审报告-宋立志.md}}", skill_text)
         self.assertIn("评论末尾固定的一行，达标与不达标都要有", skill_text)
         self.assertIn("报告附件：<KEY>-需求评审报告-宋立志.md（已上传）", doc_text)
+class ReportConclusionContractTests(unittest.TestCase):
+    """评论末尾「评审结论」契约：取值只能从报告 md 里确定性提取，不许模型自己判。"""
+
+    def test_comment_line_appends_conclusion_after_attachment(self):
+        """评论末尾固定行需在附件之后追加「｜评审结论：」，并限定三个取值。"""
+        skill_text = (GATE_SKILL_DIR / "SKILL.md").read_text(encoding="utf-8")
+        doc_text = (GATE_SKILL_DIR / "references" / "jira-api.md").read_text(encoding="utf-8")
+
+        self.assertIn("｜评审结论：{{不合格 / 需修改 / 合格}}", skill_text)
+        self.assertIn("｜评审结论：需修改", skill_text)
+        self.assertIn("｜评审结论：<不合格/需修改/合格>", doc_text)
+
+    def test_conclusion_script_is_shipped_and_restricted(self):
+        """提取脚本需随技能分发，只能输出三个取值，异常一律以退出码 1 结束。"""
+        script = GATE_SKILL_DIR / "scripts" / "report-conclusion.mjs"
+
+        self.assertTrue(script.is_file(), f"缺少技能脚本：{script}")
+        source = script.read_text(encoding="utf-8")
+        self.assertIn('const ALLOWED = ["不合格", "需修改", "合格"];', source)
+        self.assertIn("process.exitCode = 1", source)
+        self.assertIn("[提取评审结论失败]", source)
+        # 报告里每个 issue 小节固定含「- 结论：**X**」，提取必须以它为准。
+        self.assertIn("结论：\\*\\*", source)
+
+    def test_docs_forbid_guessing_the_conclusion(self):
+        """文档需写明结论由脚本提取、报告须先跑完流水线，且不许自己判。"""
+        skill_text = (GATE_SKILL_DIR / "SKILL.md").read_text(encoding="utf-8")
+        doc_text = (GATE_SKILL_DIR / "references" / "jira-api.md").read_text(encoding="utf-8")
+
+        self.assertIn("不许自己猜", skill_text)
+        self.assertIn("这一步要在写评论之前做完", skill_text)
+        self.assertIn("五步流水线必须在写评论之前跑到第 5 步", skill_text)
+        self.assertIn("它是唯一来源，不许自己判", doc_text)
+        self.assertIn("五步流水线必须在写评论之前跑到第 5 步", doc_text)
+
+    def test_script_extracts_conclusion_from_real_report_shape(self):
+        """按 report.mjs 的真实小节结构喂样例：能取到结论、无 KEY 时拒绝歧义、缺 KEY 时报错。"""
+        script = GATE_SKILL_DIR / "scripts" / "report-conclusion.mjs"
+        if not shutil.which("node"):
+            self.skipTest("未安装 node，跳过提取脚本的实跑校验")
+
+        sample = "\n".join(
+            [
+                "## 需求逐条",
+                "",
+                "### SHOP-101 消息发送失败重试",
+                "",
+                "- 结论：**合格**",
+                "- 类型 / 状态：需求 / 评审中",
+                "",
+                "### SHOP-102 订单导出",
+                "",
+                "- 结论：**需修改**",
+                "",
+            ]
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            report = Path(tmp) / "review-report.md"
+            report.write_text(sample, encoding="utf-8")
+
+            matched = self.run_script(script, str(report), "SHOP-102")
+            self.assertEqual(matched.returncode, 0, matched.stderr)
+            self.assertEqual(matched.stdout.strip(), "需修改")
+
+            ambiguous = self.run_script(script, str(report))
+            self.assertEqual(ambiguous.returncode, 1, "多 issue 且未指定 KEY 时必须报错")
+            self.assertIn("请用 KEY 参数指定", ambiguous.stderr)
+
+            missing = self.run_script(script, str(report), "SHOP-999")
+            self.assertEqual(missing.returncode, 1, "找不到该 KEY 的小节时必须报错")
+            self.assertIn("[提取评审结论失败]", missing.stderr)
+
+            illegal = Path(tmp) / "bad-report.md"
+            illegal.write_text("### SHOP-101 结构变了的报告\n\n- 结论：**待评审**\n", encoding="utf-8")
+            rejected = self.run_script(script, str(illegal), "SHOP-101")
+            self.assertEqual(rejected.returncode, 1, "取值不在三档内时必须报错")
+            self.assertIn("结论取值非法", rejected.stderr)
+
+    @staticmethod
+    def run_script(script, *args):
+        """同步执行提取脚本，返回带 returncode / stdout / stderr 的结果。"""
+        return subprocess.run(
+            ["node", str(script), *args],
+            capture_output=True,
+            encoding="utf-8",
+            check=False,
+        )
 
 
 if __name__ == "__main__":
