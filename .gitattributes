@@ -1,3 +1,8 @@
 *.jpg filter=lfs diff=lfs merge=lfs -text
 backend/Python-3.11.1.tar.gz filter=lfs diff=lfs merge=lfs -text
 *.sh text eol=lf
+
+# 离线 apt 依赖：deb 包是二进制产物，禁止行尾转换；清单与校验和随 Linux 构建使用，保持 LF 行尾。
+*.deb binary
+backend/offline/apt/*/MANIFEST.tsv text eol=lf
+backend/offline/apt/*/SHA256SUMS text eol=lf
