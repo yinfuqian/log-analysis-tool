@@ -52,13 +52,19 @@ x-backend-environment: &backend-environment
   CODEX_REASONING_EFFORT: ${CODEX_REASONING_EFFORT:-high}
   CODEX_SANDBOX: ${CODEX_SANDBOX:-danger-full-access}
   CODEX_EPHEMERAL: ${CODEX_EPHEMERAL:-true}
-  CODEX_SKILL_TIMEOUT: ${CODEX_SKILL_TIMEOUT:-1800}
+  # 单次技能执行超时秒数：留空表示按技能自身 runtime.json 声明（jira-code 7200、jira-defect-gate 3600、其余 1800）。
+  CODEX_SKILL_TIMEOUT: ${CODEX_SKILL_TIMEOUT:-}
   # 连续网络错误达到该次数即判定模型/Jira 不可达并提前终止，避免空转到超时。
   CODEX_NETWORK_RETRY_LIMIT: ${CODEX_NETWORK_RETRY_LIMIT:-10}
   # worker 启动时把上一次运行遗留的“执行中”任务标记为失败。
   SKILL_RECOVER_ORPHANS: ${SKILL_RECOVER_ORPHANS:-true}
   JIRA_TOKEN: ${JIRA_TOKEN:-}
   JIRA_BASE_URL: ${JIRA_BASE_URL:-https://jira.in.wezhuiyi.com}
+  # jira-code 技能需要 GitLab 凭据来拉分支与推送（令牌需要写仓库权限）；留空时技能会跳过推送并如实上报。
+  GIT_BASE_URL: ${GIT_BASE_URL:-}
+  GIT_USER: ${GIT_USER:-}
+  GIT_PASSWORD: ${GIT_PASSWORD:-}
+  GITLAB_PRIVATE_TOKEN: ${GITLAB_PRIVATE_TOKEN:-}
 
 x-backend-volumes: &backend-volumes
   - uploads:/data/upload

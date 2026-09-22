@@ -100,6 +100,17 @@ def _env_or(name: str, default: str) -> str:
     return value if value else default
 
 
+def _optional_int(name: str):
+    """读取可选的整型环境变量；未配置、空白或非法时返回 None，表示交给调用方按技能自身声明决定。"""
+    raw = (os.getenv(name) or "").strip()
+    if not raw:
+        return None
+    try:
+        return int(raw)
+    except ValueError:
+        return None
+
+
 def _resolve_codex_base_url():
     """解析 Codex 使用的模型中转地址：优先 CODEX_BASE_URL，其次由 OPENAI_URL 补齐 /v1，最后用内置默认中转。"""
     configured = os.getenv("CODEX_BASE_URL")
@@ -227,7 +238,9 @@ class Config:
     CODEX_SANDBOX = _env_or("CODEX_SANDBOX", "danger-full-access")
     CODEX_EPHEMERAL = _env_or("CODEX_EPHEMERAL", "true").lower() == "true"
     CODEX_EXTRA_ARGS = os.getenv("CODEX_EXTRA_ARGS", "")
-    CODEX_SKILL_TIMEOUT = int(_env_or("CODEX_SKILL_TIMEOUT", "1800"))
+    # 单次技能执行超时秒数：留空表示按技能自身 runtime.json 的 timeout_seconds 决定（未声明时 1800），
+    # 显式配置则覆盖全部技能，便于运维统一收紧或放宽。jira-code 声明 7200，jira-defect-gate 声明 3600。
+    CODEX_SKILL_TIMEOUT = _optional_int("CODEX_SKILL_TIMEOUT")
     # 连续多少次网络错误后提前判定模型/Jira 不可达，避免空转到超时。
     CODEX_NETWORK_RETRY_LIMIT = int(_env_or("CODEX_NETWORK_RETRY_LIMIT", "10"))
     # worker 启动时是否把上一次运行遗留的“执行中”任务标记为失败。

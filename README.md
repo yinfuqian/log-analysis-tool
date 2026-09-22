@@ -302,8 +302,11 @@ powershell -ExecutionPolicy Bypass -File scripts\export_release_image.ps1 `
 加载 `skills/<skill_id>/SKILL.md`，由 Agent 按技能定义访问 Jira、执行检查并写回评论。当前内置技能为
 `jira-gate-1`（Jira 需求准入检查 G1，产出难度分级与达标结论，把逐项打标记的检查项清单写入需求单评论；
 不达标时流转到「评审中」并在评论里 @ 流转人；最后调用 `review-jira-songlizhi` 生成 OpenSpec 评审报告，
-作为附件上传到需求单，文件名以「宋立志」结尾）与 `review-jira-songlizhi`（按 OpenSpec 好需求标准评审需求质量，
-产出 Markdown 报告，对 Jira 只读）。
+作为附件上传到需求单，文件名以「宋立志」结尾；交付完成后清理本次任务的工作区中间产物）、
+`review-jira-songlizhi`（按 OpenSpec 好需求标准评审需求质量，
+产出 Markdown 报告，对 Jira 只读）与 `jira-code`（读取需求单的「开发方案」附件，从方案指定的基线分支拉出
+`feature/<单号>` 分支，按方案实现代码并推送到远端，推送成功后清理本地检出目录；进度与异常都只更新在同一条
+Jira 评论上；既不改单据状态，也不上传附件）。
 
 ### 接口一览
 
@@ -367,7 +370,7 @@ curl -H "X-API-Token: <SKILL_API_TOKEN>" http://127.0.0.1:5000/skill/task/SKL-8F
 | `SKILL_API_TOKEN` | `local-dev-token` | 外部系统调用 `/skill` 接口的独立令牌；默认值仅供本地验证，生产环境必须替换为随机强令牌 |
 | `SKILL_URL_ALLOWED_HOSTS` | `jira.in.wezhuiyi.com` | `jira_url` 主机白名单，逗号分隔；留空表示不限制 |
 | `SKILL_WORKSPACE_DIR` | `/data/skill-workspace` | 技能工作目录 |
-| `CODEX_SKILL_TIMEOUT` | `1800` | 单次技能执行超时秒数；`jira-gate-bug` 还要等故障分析完成，建议生产环境提高到 `3600` |
+| `CODEX_SKILL_TIMEOUT` | 留空 | 单次技能执行超时秒数；留空表示按技能自身 `runtime.json` 声明（`jira-code` 7200、`jira-defect-gate` 3600、其余 1800），填写后统一覆盖 |
 | `CODEX_MODEL` | `codex/deepseek-flash` | Codex 使用的模型 |
 | `CODEX_MODEL_PROVIDER` | `skillrun` | 模型提供方标识，后端以 `-c model_provider=...` 传给 Codex |
 | `CODEX_BASE_URL` | `https://newapi.in.wezhuiyi.com/v1` | 模型中转地址；未配置时回退 `OPENAI_URL` |
@@ -380,6 +383,9 @@ curl -H "X-API-Token: <SKILL_API_TOKEN>" http://127.0.0.1:5000/skill/task/SKL-8F
 | `SKILLS_DIR` | `/data/skills` | 技能目录，容器内由 `./skills` 只读挂载而来，Codex 运行时不会改写它 |
 | `JIRA_TOKEN` | 无（**必填**） | 注入给技能脚本的 Jira 个人访问令牌；也可把令牌文件放到 `skills/.jira-token` |
 | `JIRA_BASE_URL` | `https://jira.in.wezhuiyi.com` | 注入给技能脚本的 Jira 站点地址 |
+| `GITLAB_PRIVATE_TOKEN` | 无 | `jira-code` 拉分支与推送代码用的 GitLab 令牌，需要仓库写权限；缺失时技能只会中断并如实上报 |
+| `GIT_BASE_URL` | 无 | GitLab 站点地址；方案里只写 `group/repo` 时用它补全克隆地址 |
+| `GIT_USER`、`GIT_PASSWORD` | 无 | 没有 `GITLAB_PRIVATE_TOKEN` 时的账号密码兜底 |
 | `ANALYSIS_API_BASE_URL` | `http://api:5000` | `jira-gate-bug` 回写时调用的本服务地址（宿主网络改为 `http://127.0.0.1:5000`） |
 | `ANALYSIS_API_TOKEN` | `local-dev-analysis-token` | 技能脚本调用 `/analysis`、`/logfile` 等接口的内部令牌；生产环境必须替换 |
 
@@ -398,6 +404,8 @@ Codex 自己生成的状态文件全部落在 `codex-home` 卷（本地运行对
 
 ```bash
 docker compose exec worker node /data/skills/jira-gate-1/scripts/jira-cli.mjs selftest
+# jira-code 额外自检 GitLab 凭据（只回显来源，不打印令牌）
+docker compose exec worker node /data/skills/jira-code/scripts/git-flow.mjs creds
 ```
 
 - API 只负责提交任务，Codex 实际执行发生在 `worker` 容器，请确保 `worker` 能访问 Jira 与模型中转。
@@ -420,6 +428,7 @@ Copy-Item .env.example backend\.env
 
 - 数据库与 Redis：`MYSQL_HOST`、`MYSQL_PORT`、`MYSQL_DATABASE`、`MYSQL_USERNAME`、`MYSQL_PASSWORD` 指向可用的 MySQL 实例；`REDIS_HOST`、`REDIS_PORT` 指向可用的 Redis。应用默认按这组参数拼装 `SQLALCHEMY_DATABASE_URI`，无需手写连接串。
 - 必填密钥：`JIRA_TOKEN`、`CODEX_API_KEY`。其余技能配置（含 `CODEX_MODEL`、`CODEX_BASE_URL`、`SKILL_API_TOKEN`、`JIRA_BASE_URL`）均已内置可用默认值。
+- 要跑 `jira-code` 才需要额外配置 `GITLAB_PRIVATE_TOKEN`（需仓库写权限）与 `GIT_BASE_URL`；不填也能启动服务，只是该技能会中断并说明缺少凭据。
 - 本地路径：把 `LOCAL_STORAGE_DIR`、`LOG_DIR` 改成本机可写目录，不要沿用容器内的 `/data/...` 路径。
 
 3. 建表（与生产同一套迁移）：
@@ -454,6 +463,8 @@ ANALYSIS_API_TOKEN=local-dev-analysis-token
 
 ```powershell
 node ..\skills\jira-gate-1\scripts\jira-cli.mjs selftest
+node ..\skills\jira-code\scripts\jira-cli.mjs selftest
+node ..\skills\jira-code\scripts\git-flow.mjs creds
 node ..\skills\jira-gate-bug\scripts\jira-cli.mjs selftest
 node ..\skills\jira-gate-bug\scripts\analysis-cli.mjs selftest
 node ..\skills\jira-gate-bug\scripts\analysis-cli.mjs resolve --product yibot --module yibot-server
@@ -470,6 +481,8 @@ node ..\skills\jira-gate-bug\scripts\analysis-cli.mjs render --input <结果JSON
 **验证注意事项**
 
 - `jira-gate-1` 在达标与不达标两种情况下都会**真实写入 Jira 评论**（内容是逐项打标记的检查项清单）。本地验证请使用测试单或临时项目单，不要拿正式需求单试跑。
+- `jira-code` 会真实创建分支、写代码并把提交**推送到远端仓库**（同时真实写一条评论）。本地验证请用测试仓库与测试单，不要指向业务主干仓库。
+  推送成功后技能会删掉工作区里的检出目录；推送失败或还有未推送提交时则会保留，便于继续排查。
 - `jira-gate-bug` 同样会真实写评论；没有自查结果时还会上传 HTML 报告附件并消耗一次完整的故障分析（拉代码 + 模型推理）。本地验证请使用测试缺陷单。
 - 异步分析依赖 Redis：`/health/ready` 的 `checks.redis` 必须是 `ok`，否则 `/analysis/submit_async` 无法入队（技能第 3 步会失败）。上传与分析提交本身不依赖 Redis 之外的组件。
 - 未配置 `LOCAL_OCR_ENABLED=true` 时图片识别走多模态模型；本地 `.env` 若仍写着 `true`，可用会话变量覆盖（`$env:LOCAL_OCR_ENABLED = "false"`），根 `.env` 的值不会覆盖已有环境变量。

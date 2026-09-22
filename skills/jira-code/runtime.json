@@ -1,0 +1,5 @@
+{
+  "prompt_template": "请使用 {skill_id} 技能完成本次任务：读取 Jira 单上的开发方案并把方案实现成代码。\n\n任务输入：\n- jira 链接：{jira_url}\n{inputs_lines}\n\n执行要求：\n1. 先完整阅读 {skill_dir}/SKILL.md 及其 references（jira-api.md / gitlab-api.md / plan-format.md），严格按其中的流程与硬边界执行，不要自行发明规则。\n2. 当前环境是服务器容器，没有桌面工具：所有操作都用 shell 执行技能自带脚本（node {skill_dir}/scripts/xxx.mjs）。\n3. 流程：读单子 → 下载并解析「开发方案」附件 → 用 plan.mjs 提取仓库与基线分支 → 启动 progress.mjs 进度心跳 → git-flow.mjs prepare 拉出 feature/<KEY> 分支 → 按方案写代码、提交、推送 → git-flow.mjs cleanup --verify-remote 删除本地检出目录 → progress.mjs finish 收尾。\n4. 中途不要停下来等人工确认，一次把代码写完；只有「没有开发方案 / 方案里没有仓库或分支 / 无法确定仓库与分支的对应关系」这三种情况才允许中断流程。\n5. 进度与异常只写进同一条 Jira 评论（progress.mjs 维护，默认每 5 分钟自动刷新），不要新增第二条进度评论。\n6. 不改单据状态、不写自定义字段、不上传附件、不使用 git 强制推送。\n7. 推送成功后必须用 git-flow.mjs cleanup --verify-remote 把刚拉下来的检出目录删掉，不在工作区留代码副本；若有提交未推送或仍有未提交改动，cleanup 会拒绝删除，此时先补推送，不要直接加 --force 丢代码；只有推送失败、需要保留现场排查时才不清理。\n8. 完成后用简洁中文总结：仓库、分支 feature/<KEY>、提交、推送结果、评论状态，以及未完成的部分与原因。",
+  "timeout_seconds": 7200,
+  "required_inputs": ["jira_url"]
+}

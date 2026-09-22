@@ -101,6 +101,9 @@ JIRA_BASE_URL=https://jira.in.wezhuiyi.com
 # Codex 使用的模型与中转地址
 CODEX_MODEL=codex/deepseek-flash
 CODEX_BASE_URL=https://newapi.in.wezhuiyi.com/v1
+# jira-code 拉分支、推送代码用的 GitLab 凭据（令牌需要仓库写权限）与站点地址
+GITLAB_PRIVATE_TOKEN=请填写
+GIT_BASE_URL=https://code.in.wezhuiyi.com/
 ```
 
 部署后自检：
@@ -108,6 +111,9 @@ CODEX_BASE_URL=https://newapi.in.wezhuiyi.com/v1
 ```bash
 docker compose --env-file .env.production -f docker-compose.prod.yml exec worker \
   node /data/skills/jira-gate-1/scripts/jira-cli.mjs selftest
+# jira-code 额外自检 GitLab 凭据（只回显来源，不打印令牌）
+docker compose --env-file .env.production -f docker-compose.prod.yml exec worker \
+  node /data/skills/jira-code/scripts/git-flow.mjs creds
 curl -H "X-API-Token: <SKILL_API_TOKEN>" http://127.0.0.1:5000/skill/list
 ```
 

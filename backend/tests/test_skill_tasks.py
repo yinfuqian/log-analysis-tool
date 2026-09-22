@@ -123,6 +123,42 @@ class SkillTaskTests(unittest.TestCase):
         self.assertEqual(record.status, "timeout")
         self.assertIn("已强制终止", record.error_message)
 
+    def run_jira_code_task(self):
+        """用 jira-code（runtime.json 声明 7200 秒）跑一次任务，返回 Codex mock 以读取实际超时参数。"""
+        from app.skillrun import store
+        from app.skillrun.codex_runner import CodexRunResult
+
+        self.record = store.create_record(
+            skill_id="jira-code",
+            jira_url="https://jira.in.wezhuiyi.com/browse/CALL-1446",
+            inputs={},
+            requested_by="tester",
+        )
+        _, runner = self.run_task(CodexRunResult(exit_code=0, last_message="已完成", duration_ms=1000))
+        return runner
+
+    def test_timeout_follows_skill_declaration_when_not_configured(self):
+        """未配置 CODEX_SKILL_TIMEOUT 时按技能自身声明执行：jira-code 拿到 7200 秒，而不是全局默认 1800。"""
+        original = self.app.config.pop("CODEX_SKILL_TIMEOUT", None)
+        try:
+            runner = self.run_jira_code_task()
+            self.assertEqual(runner.call_args.kwargs["timeout_seconds"], 7200)
+        finally:
+            if original is not None:
+                self.app.config["CODEX_SKILL_TIMEOUT"] = original
+
+    def test_timeout_config_overrides_skill_declaration(self):
+        """显式配置 CODEX_SKILL_TIMEOUT 时以配置为准，便于运维统一收紧或放宽所有技能。"""
+        original = self.app.config.get("CODEX_SKILL_TIMEOUT")
+        self.app.config["CODEX_SKILL_TIMEOUT"] = 900
+        try:
+            runner = self.run_jira_code_task()
+            self.assertEqual(runner.call_args.kwargs["timeout_seconds"], 900)
+        finally:
+            if original is None:
+                self.app.config.pop("CODEX_SKILL_TIMEOUT", None)
+            else:
+                self.app.config["CODEX_SKILL_TIMEOUT"] = original
     def test_non_zero_exit_marks_record_as_failed(self):
         """Codex 非零退出时记录状态为失败。"""
         from app.skillrun import store

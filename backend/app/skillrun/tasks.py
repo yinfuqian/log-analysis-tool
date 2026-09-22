@@ -156,6 +156,7 @@ def run_skill_task(self, record_id: int):
         codex_home=codex_home,
     )
 
+    # 未显式配置 CODEX_SKILL_TIMEOUT 时按技能自身 runtime.json 声明的超时执行（缺省 1800 秒）。
     timeout_seconds = int(config.get("CODEX_SKILL_TIMEOUT") or skill.timeout_seconds)
     network_retry_limit = int(
         config.get("CODEX_NETWORK_RETRY_LIMIT") or codex_runner.DEFAULT_NETWORK_RETRY_LIMIT

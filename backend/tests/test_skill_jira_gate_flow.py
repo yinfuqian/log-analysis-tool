@@ -1,4 +1,8 @@
 """技能流转契约测试：锁定「仅不达标时流转到『评审中』并 @ 流转人」的脚本与文档约定。"""
+import json
+import shutil
+import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -9,6 +13,8 @@ SKILL_PATH = SKILL_DIR / "SKILL.md"
 JIRA_SCRIPT_PATH = SKILL_DIR / "scripts" / "jira.mjs"
 CLI_PATH = SKILL_DIR / "scripts" / "jira-cli.mjs"
 API_DOC_PATH = SKILL_DIR / "references" / "jira-api.md"
+CLEANUP_SCRIPT_PATH = SKILL_DIR / "scripts" / "workdir-cleanup.mjs"
+NODE = shutil.which("node")
 
 
 class SkillJiraGateFlowTests(unittest.TestCase):
@@ -66,6 +72,103 @@ class SkillJiraGateFlowTests(unittest.TestCase):
 
         self.assertIn("口径就是经办人", skill_text)
         self.assertIn("取经办人 `assignee`", doc_text)
+
+
+class WorkdirCleanupDocTests(unittest.TestCase):
+    """SKILL.md 必须写明收尾清理的范围、幂等性与「失败保留现场」。"""
+
+    def test_skill_documents_cleanup_step(self):
+        text = SKILL_PATH.read_text(encoding="utf-8")
+
+        self.assertIn("### 12. 收尾：清理本次任务的工作区中间产物", text)
+        self.assertIn("workdir-cleanup.mjs --key <KEY>", text)
+        self.assertIn("`reports/` 不在清理范围内", text)
+        self.assertIn("交付失败（异常中断）时不要调用本脚本", text)
+        self.assertIn("按 §12 清理工作区中间产物", text)
+
+
+@unittest.skipUnless(NODE, "未安装 node，跳过工作区清理测试")
+class WorkdirCleanupTests(unittest.TestCase):
+    """workdir-cleanup.mjs：只清本次任务的中间产物，路径写错时拒绝执行。"""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.work = Path(self.tmp.name) / "workspace"
+        # 本次任务的中间产物：附件、解压产物与中间文件
+        self.target = self.work / "work" / "jira-gate" / "CALL-1941"
+        (self.target / "attachments" / "__unpacked").mkdir(parents=True)
+        (self.target / "attachments" / "需求.rar").write_bytes(b"x" * 1024)
+        (self.target / "attachments" / "__unpacked" / "prd.md").write_text("hi", encoding="utf-8")
+        (self.target / "comment.txt").write_text("c", encoding="utf-8")
+        # 别的单子的工作目录，必须不受影响
+        self.other = self.work / "work" / "jira-gate" / "CALL-9999"
+        self.other.mkdir(parents=True)
+        (self.other / "keep.txt").write_text("keep", encoding="utf-8")
+        # reports/ 是附件来源，不属于清理范围
+        self.reports = self.work / "reports"
+        self.reports.mkdir()
+        (self.reports / "review-report-1.md").write_text("report", encoding="utf-8")
+
+    def run_cleanup(self, *args, expect=0):
+        """在临时工作目录里执行清理脚本，返回进程结果。"""
+        result = subprocess.run(
+            [NODE, str(CLEANUP_SCRIPT_PATH), *[str(item) for item in args]],
+            capture_output=True,
+            encoding="utf-8",
+            errors="replace",
+            cwd=str(self.work),
+            check=False,
+            timeout=60,
+        )
+        self.assertEqual(result.returncode, expect, result.stderr)
+        return result
+
+    def test_removes_only_this_task_workdir(self):
+        """清理只删本次任务的目录，别的单子与 reports/ 不受影响。"""
+        payload = json.loads(self.run_cleanup("--key", "CALL-1941").stdout)
+
+        self.assertTrue(payload["removed"])
+        self.assertEqual(payload["removedFileCount"], 3)
+        self.assertFalse(self.target.exists())
+        self.assertTrue((self.other / "keep.txt").is_file(), "别的单子的工作目录不能被删")
+        self.assertTrue((self.reports / "review-report-1.md").is_file(), "reports/ 不在清理范围内")
+
+    def test_is_idempotent_when_already_cleaned(self):
+        """重复收尾不该报错：目录已不存在时返回 not-found。"""
+        self.run_cleanup("--key", "CALL-1941")
+
+        payload = json.loads(self.run_cleanup("--key", "CALL-1941").stdout)
+
+        self.assertTrue(payload["ok"])
+        self.assertFalse(payload["removed"])
+        self.assertEqual(payload["reason"], "not-found")
+
+    def test_dry_run_keeps_everything(self):
+        """--dry-run 只统计文件数与字节数，不实际删除。"""
+        payload = json.loads(self.run_cleanup("--key", "CALL-1941", "--dry-run").stdout)
+
+        self.assertFalse(payload["removed"])
+        self.assertEqual(payload["reason"], "dry-run")
+        self.assertEqual(payload["removedFileCount"], 3)
+        self.assertGreater(payload["removedBytes"], 0)
+        self.assertTrue(self.target.exists())
+
+    def test_refuses_path_traversal(self):
+        """单号里带路径分隔符或 .. 时拒绝执行，绝不越出 work/jira-gate。"""
+        for bad in ("../..", "..", "CALL-1941/../../..", "../../etc"):
+            with self.subTest(key=bad):
+                result = self.run_cleanup("--key", bad, expect=1)
+                self.assertIn("unsafe-path", result.stderr)
+
+        self.assertTrue((self.work / "work" / "jira-gate").is_dir(), "工作区不能被误删")
+
+    def test_requires_key(self):
+        """缺少 --key 时以退出码 1 报错，且不做任何删除。"""
+        result = self.run_cleanup(expect=1)
+
+        self.assertIn("key-missing", result.stderr)
+        self.assertTrue(self.target.exists())
 
 
 if __name__ == "__main__":
