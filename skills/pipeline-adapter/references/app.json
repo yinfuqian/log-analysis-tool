@@ -1,0 +1,215 @@
+{
+	"component_type": "application",
+	"access_service_governance": false,
+	"applications": [
+		{
+			"type": "deployment",
+			"scope": "all",
+			"containers": [
+				{
+					"type": "general",
+					"spec": [
+						{
+							"name": "{{REPO_GROUP}}-{{REPO_NAME}}",
+							"healthcheck_ref": {
+								"name": "common-health-check"
+							},
+							"volumes_ref": {
+								"name": "common-volumes"
+							},
+							"resources_ref": {
+								"name": "common-resources"
+							},
+							"env": [],
+							"envFrom": [
+								{
+									"type": "configMapRef",
+									"name": "{{REPO_GROUP}}-{{REPO_NAME}}-common-config"
+								}
+							],
+							"service_name": "",
+							"ports": [
+								{
+									"name": "{{SERVER_PORT}}",
+									"protocol": "TCP",
+									"port": {{EXPOSED_PORT}},
+									"targetPort": {{SERVER_PORT}}
+								}
+							],
+							"scope": "all"
+						}
+					]
+				}
+			]
+		}
+	],
+	"switches": [
+		{
+			"name": "ingress-enable",
+			"value": "True",
+			"operator": "==",
+			"origin_expression": "config[\"ingress-enable\"] == True",
+			"is_built_in": true,
+			"is_self_config": true,
+			"meaning": "是否开启 Ingress 访问",
+			"option_values": [
+				"true",
+				"false"
+			]
+		}
+	],
+	"environments": [
+		{
+			"name": "{{REPO_GROUP}}-{{REPO_NAME}}-common-config",
+			"labels": {
+				"app.kubernetes.io/code-repo": "{{REPO_GROUP}}_{{REPO_NAME}}",
+				"app.kubernetes.io/name": "{{REPO_GROUP}}-{{REPO_NAME}}-common-config",
+				"app.kubernetes.io/part-of": "{{MODULE_GROUP}}"
+			},
+			"scope": "all",
+			"data": [
+				{
+					"name": "GROUP_ID",
+					"value": "1010",
+					"group": "default",
+					"configurable": true,
+					"option_values": [
+						"1010"
+					],
+					"configure_name": "",
+					"built_in_variable": false,
+					"conditions": [],
+					"switch_type": "",
+					"required": true,
+					"is_self_config": true,
+					"b64encode": false,
+					"is_config_file": false,
+					"description": "运行用户组编号",
+					"meaning": "运行用户组编号",
+					"type": "value",
+					"skip_inject": false,
+					"valueFrom": {}
+				},
+				{
+					"name": "USER_ID",
+					"value": "1010",
+					"group": "default",
+					"configurable": true,
+					"option_values": [
+						"1010"
+					],
+					"configure_name": "",
+					"built_in_variable": false,
+					"conditions": [],
+					"switch_type": "",
+					"required": true,
+					"is_self_config": true,
+					"b64encode": false,
+					"is_config_file": false,
+					"description": "运行用户编号",
+					"meaning": "运行用户编号",
+					"type": "value",
+					"skip_inject": false,
+					"valueFrom": {}
+				},
+				{
+					"name": "SERVER_PORT",
+					"value": "{{SERVER_PORT}}",
+					"group": "default",
+					"configurable": true,
+					"option_values": [
+						"{{SERVER_PORT}}"
+					],
+					"configure_name": "",
+					"built_in_variable": false,
+					"conditions": [],
+					"switch_type": "",
+					"required": true,
+					"is_self_config": true,
+					"b64encode": false,
+					"is_config_file": false,
+					"description": "服务监听端口",
+					"meaning": "服务监听端口",
+					"type": "value",
+					"skip_inject": false,
+					"valueFrom": {}
+				}
+			]
+		}
+	],
+	"secrets": [],
+	"healthcheck": [
+		{
+			"name": "common-health-check",
+			"data": [
+				{
+					"name": "readinessProbe",
+					"type": "httpGet",
+					"port": "${SERVER_PORT}",
+					"initialDelaySeconds": 10,
+					"periodSeconds": 5,
+					"timeoutSeconds": 5,
+					"successThreshold": 1,
+					"failureThreshold": 3,
+					"path": "/readyz"
+				},
+				{
+					"name": "livenessProbe",
+					"type": "httpGet",
+					"port": "${SERVER_PORT}",
+					"initialDelaySeconds": 15,
+					"periodSeconds": 5,
+					"timeoutSeconds": 5,
+					"successThreshold": 1,
+					"failureThreshold": 3,
+					"path": "/livez"
+				},
+				{
+					"name": "startupProbe",
+					"type": "httpGet",
+					"port": "${SERVER_PORT}",
+					"path": "/readyz",
+					"initialDelaySeconds": 10,
+					"periodSeconds": 5,
+					"timeoutSeconds": 5,
+					"successThreshold": 1,
+					"failureThreshold": 30
+				}
+			]
+		}
+	],
+	"resources": [
+		{
+			"name": "common-resources",
+			"data": [
+				{
+					"type": "limits",
+					"cpu": "200m",
+					"memory": "128Mi",
+					"ephemeral-storage": "5Gi"
+				},
+				{
+					"type": "requests",
+					"cpu": "200m",
+					"memory": "128Mi",
+					"ephemeral-storage": "5Gi"
+				}
+			]
+		}
+	],
+	"volumes": [
+		{
+			"name": "common-volumes",
+			"data": [
+				{
+					"name": "data",
+					"type": "bind",
+					"source_from": "file",
+					"src": "${DATA_DIR}/${APP_NAME}/var/log",
+					"dst": "{{MODULE_NAME_UPPER_HYPHEN_WORKING_DIR}}/var/log",
+					"size": "2Gi"
+				}
+			]
+		}
+	]
+}

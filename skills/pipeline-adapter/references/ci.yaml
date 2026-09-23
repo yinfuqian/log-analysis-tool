@@ -1,0 +1,41 @@
+# ci.yaml
+# 配置流水线构建参数，流水线将在构建打包模块时读取相应的参数，该文件必须
+#
+version: v3    # 流水线版本，必须，默认v1
+framework: go  # 技术框架，该项目使用的技术框架，Eg: go、java、cpp、cpp_go、go_java，必须
+orchestration:
+  type: docker-compose-and-kubernetes  # TODO: 服务编排类型，必须。可选值：none、docker-compose、kubernetes、docker-compose-and-kubernetes
+                                      # - none: 仅出镜像/制品，不生成编排文件（配合 packageType: image）
+                                      # - docker-compose: 仅生成 docker-compose 编排文件
+                                      # - kubernetes: 仅生成 K8S 编排文件
+                                      # - docker-compose-and-kubernetes: 同时生成 docker-compose 和 K8S 编排文件
+buildParameters:
+  buildFrom: "dockerfile" # 构建类型：dockerfile、jib、none（必须）
+  compileOption: "--build-arg COMMIT=${IMAGE_TAG}"  # 自定义构建参数，默认为空（必须）; 如果需要透传commit或者版本号，这里填:  --build-arg COMMIT=${IMAGE_TAG}
+  packageType: "service" # TODO: 制品类型：service、tar、image（必须）
+                            # 注意：当 orchestration.type 为 docker-compose / kubernetes / docker-compose-and-kubernetes 时，packageType 必须为 service
+  modules: "" # 单仓库多模块时使用，提供子模块名；默认为空（必须）
+  platform:
+    - "linux/amd64"
+    - "linux/arm64"
+    # platform 可选值："linux/amd64"、"linux/arm64"、"arch-independent"
+    # 默认 ["linux/amd64", "linux/arm64"]；与架构无关的技术栈（如 Java）可填 "arch-independent"
+  #builderPlatform: "linux/amd64" #构建脚本支持交叉编译时指定编译平台，可以用amd构建出amd和arm，无需在arm上构建
+  ################### 以下参数，请在指导下使用，切勿滥用 ###################################
+  registryGroup: "{{MODULE_GROUP}}" # 镜像和制品库组名（对应着 gitlab 仓库所在的组名），默认为空（可选）
+  ignoreFiles: ""  # 检出忽略文件,example: "readme,test/a.txt"，默认为空 （可选）
+  aliasRepoName: "" # 仓库别称，默认为空（可选）
+unitTest: # 可选
+  cmd: "sh -c 'go mod tidy && go test ./... -coverprofile=./cov.out service-sonar'" # 运行单测的命令(可选)
+  # 运行单测的镜像；Java 模块无需指定；其他模块若需指定，必须使用 registry01.wezhuiyi.com/standard/centos-builder:v1.8.0
+  image: "registry01.wezhuiyi.com/standard/centos-builder:v1.8.0"
+  workdir: "/src" # 默认为/src，与下方volumes映射目录相关，无特殊情况请勿修改
+  envs:
+    - GOPROXY: http://pkg.in.wezhuiyi.com/repository/golang/,direct
+    - GOPRIVATE: code.in.wezhuiyi.com
+    - GOSUMDB: 'off'
+    - GO111MODULE: 'on'
+    - GOPATH: "/tmp/go"
+    - XDG_CACHE_HOME: "/tmp/.cache"
+  volumes:
+    - $PWD: /src

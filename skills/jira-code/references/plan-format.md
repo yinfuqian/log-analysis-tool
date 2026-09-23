@@ -50,7 +50,48 @@
 - 仓库行**紧邻下一行**只有分支且下一行没有仓库 → `source: "neighbor-line"`（常见的「项目符号列表」写法）。
 - 其他情况不猜配对：由技能按 `SKILL.md` §3.3 决定是「唯一候选直接配对」还是「信息不足 → 中断」。
 
-## 3. 判定与中断口径
+## 3. 提流水线环境：`plan.mjs pipeline <方案文本文件>`
+
+热更新要往哪个环境推，同样只认脚本输出。输出结构：
+
+```json
+{
+  "ok": true,
+  "textSource": ".../plan.txt",
+  "pipelines": [
+    {
+      "url": "https://devops.ks1.wezhuiyi.com/pipeline/project/10000054/release/20000526/env/30035160/application",
+      "host": "devops.ks1.wezhuiyi.com",
+      "projectId": "10000054",
+      "releaseId": "20000526",
+      "envId": "30035160",
+      "line": 12,
+      "raw": "环境地址：https://devops.ks1.wezhuiyi.com/...",
+      "count": 1
+    }
+  ]
+}
+```
+
+### 3.1 识别规则
+
+- 只认 `/pipeline/project/<数字>` 这种流水线地址；裸的 `/application`、`/env/<id>` 片段不构成候选。
+- **同一条地址里必须同时有 `/pipeline/project/<id>` 和 `/env/<id>`**：只有 project 没有 env 时无法定位要更新哪个环境，直接跳过而不是猜一个默认环境。
+- `release/<id>` 存在就一并回显（`releaseId`），缺失不影响候选成立。
+- 保留方案里的原始写法，包括尾部 `/application` 之类的路径，不做裁剪。
+- 同一地址在方案里出现多次时只保留一条，用 `count` 记录出现次数（`count > 1` 说明方案里反复强调，可信度更高）。
+
+### 3.2 与仓库候选一起看
+
+`candidates` 子命令的输出里也会**顺带**带上 `pipelines` 字段（结构同上），正常流程一次 `candidates` 就能拿到仓库、分支、流水线三样东西。需要单独核对时再跑一次 `pipeline`。
+
+### 3.3 判定口径
+
+- 扫不到任何候选 → `ok:false`、`reason:"pipeline-not-found"`，但**退出码仍是 0**。这不是失败：代码此时已经推送完成，只是没法自动热更新，技能按 `SKILL.md` §3.8 在评论里写明「代码已推送，热更新未执行」后正常收尾。
+- 扫到多条：能对到不同环境就**逐个处理**（每个环境各做一次热更新）；分不清哪个环境对应哪个模块时，列出候选并**跳过热更新**（在评论里写明原因），**不算任务失败**——代码此时已经推送完成。
+- 任何情况下都**不允许**自己拼 `project`/`env` id，也不允许拿 `candidates` 里的 GitLab 地址去凑流水线地址。
+
+## 4. 判定与中断口径
 
 - `repos` 或 `branches` 为空 → `ok:false`，`reason` 为 `repo-not-found` / `branch-not-found`，退出码 1 → 技能按 §3.4 评论并中断。
 - 有多个仓库或多个分支：优先按 `pairs` 逐对处理（方案可能同时涉及多个仓库）；`pairs` 为空且各自只有一个候选时可以直接配对；否则中断请人确认。

@@ -1,0 +1,46 @@
+#!/bin/bash
+# entrypoint.sh
+# entrypoint.sh 文件用于容器非 root 启动的入口，请再加入该脚本的之前，首先确认服务基础镜像必须含有 gosu 的二进制文件来支持非 root 启动
+WORKDIR="$( cd "$( dirname "$0"  )" && pwd  )/.."
+
+function env_check(){
+    local exit_ var_
+    exit_=false
+    for var_ in "${@}";do
+        if [[ -z "$(eval echo '$'"${var_}")" ]];then
+             echo "${var_} is empty."
+             exit_=true
+        fi
+    done
+    if $exit_;then
+        exit 1
+    fi
+}
+
+start_service(){
+    # TODO: 根据实际项目入口脚本修改启动命令
+    "${WORKDIR}"/share/python/bin/python3 ${WORKDIR}/lib/my_app.py runserver -h 0.0.0.0 -p "${SERVER_PORT}"
+}
+
+RUN_USER="ops"
+env_check USER_ID GROUP_ID SERVER_PORT
+
+if [[ "$(id -u)" == "0" ]] && [[ "${USER_ID}" != "0" ]]; then
+    if type useradd >/dev/null 2>&1; then
+        id ${RUN_USER} >/dev/null 2>&1 || useradd -u "${USER_ID}" ${RUN_USER} && groupmod -g "${GROUP_ID}" ${RUN_USER}
+    else
+        id ${RUN_USER} >/dev/null 2>&1 || adduser -u ${USER_ID} -g ${GROUP_ID} ${RUN_USER} -D
+    fi
+    chown -R "${USER_ID}":"${GROUP_ID}" "${WORKDIR}"
+    exec gosu "${USER_ID}":"${GROUP_ID}" "${0}" "${@}"
+fi
+
+# 将python根目录声明到path变量中
+export PATH="${WORKDIR}"/share/python/bin:$PATH
+
+# 检查python环境是否就绪
+if [[ ! -x "${WORKDIR}"/share/python/bin/python3 ]]; then
+    echo "python3 not found in ${WORKDIR}/share/python/bin/, python env may not ready, exit!"
+    exit 1
+fi
+start_service

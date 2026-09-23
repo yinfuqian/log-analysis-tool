@@ -1,0 +1,65 @@
+apiVersion: apps/v1
+kind: StatefulSet  # 有状态类型为StatefulSet
+metadata:
+  name: {{REPO_GROUP}}-{{REPO_NAME}} # statefulset的名字，格式为：模块名字，不支持下划线
+  labels:
+    app.kubernetes.io/code-repo: {{REPO_GROUP}}_{{REPO_NAME}}
+    app.kubernetes.io/name: {{REPO_GROUP}}_{{REPO_NAME}}
+    app.kubernetes.io/component: application
+    app.kubernetes.io/part-of: {{MODULE_GROUP}}
+spec:
+  serviceName: {{REPO_GROUP}}-{{REPO_NAME}}-headless
+  replicas: 1 # TODO pod副本数目
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{REPO_GROUP}}_{{REPO_NAME}}
+      app.kubernetes.io/part-of: {{MODULE_GROUP}}
+  podManagementPolicy: Parallel
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/code-repo: {{REPO_GROUP}}_{{REPO_NAME}}
+        app.kubernetes.io/name: {{REPO_GROUP}}_{{REPO_NAME}}
+        app.kubernetes.io/component: application
+        app.kubernetes.io/part-of: {{MODULE_GROUP}}
+    spec:
+      imagePullSecrets:
+        - name: registry-secrets
+      containers:
+        - image: {{ REGISTRY_ADDR | default('') }}{{MODULE_GROUP}}/{{REPO_NAME}}:{{MODULE_NAME_UPPER_HYPHEN_IMAGE_TAG}}
+          imagePullPolicy: IfNotPresent
+          name: {{REPO_GROUP}}-{{REPO_NAME}}
+          env:
+            # TODO: 环境变量已统一收敛到 app.json 中，流水线会自动填充 env 和 envFrom，此处保留空标签即可
+          envFrom:
+            # TODO: ConfigMap 引用已统一收敛到 app.json 中，流水线会自动填充，此处保留空标签即可
+          resources:
+            # TODO: 资源限制已统一收敛到 app.json 的 resources 中，流水线会自动填充，此处保留空标签即可
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: {{ env['{{REPO_NAME}}-server-port'] | default({{SERVER_PORT}}) }}
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            timeoutSeconds: 5
+            failureThreshold: 10
+          livenessProbe:
+            httpGet:
+              path: /livez
+              port: {{ env['{{REPO_NAME}}-server-port'] | default({{SERVER_PORT}}) }}
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+          volumeMounts:
+            # TODO: 挂载卷已统一收敛到 app.json 的 volumes 中，StatefulSet 可配合 volumeClaimTemplates 使用 PVC
+  volumeClaimTemplates:
+    # TODO: 有状态服务按需声明持久卷，以下为示例
+    - metadata:
+        name: {{REPO_GROUP}}-{{REPO_NAME}}-data
+      spec:
+        accessModes:
+          - "ReadWriteOnce"
+        resources:
+          requests:
+            storage: {{ env['{{REPO_NAME}}-storage'] | default("2Gi") }}
+        storageClassName: "{{ env['storage-class'] | default('local-path') }}"

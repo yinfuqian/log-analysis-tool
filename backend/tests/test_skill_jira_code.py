@@ -109,6 +109,7 @@ class SkillPackagingTests(unittest.TestCase):
             SKILL_DIR / "references" / "jira-api.md",
             SKILL_DIR / "references" / "gitlab-api.md",
             SKILL_DIR / "references" / "plan-format.md",
+            SKILL_DIR / "references" / "hotreload.md",
         ]
         for path in expected:
             self.assertTrue(path.is_file(), f"缺少技能文件：{path}")
@@ -160,6 +161,68 @@ class SkillPackagingTests(unittest.TestCase):
         self.assertIn("unpushed-commits", gitlab)
         self.assertIn("pairs", plan)
         self.assertIn("repo-not-found", plan)
+
+    def test_hotreload_reference_locks_address_source_and_degradation(self):
+        """热更新参考资料要锁死地址来源、凭据名与降级口径，避免执行时自己拼地址。"""
+        hotreload = (SKILL_DIR / "references" / "hotreload.md").read_text(encoding="utf-8")
+
+        self.assertIn("devops-mcp-invoker", hotreload)
+        self.assertIn("DEVOPS_MCP_TOKEN", hotreload)
+        self.assertIn("DEVOPS_MCP_URL", hotreload)
+        self.assertIn("pipeline-not-found", hotreload)
+        self.assertIn("env_type", hotreload)
+        self.assertIn("download_hotreload_tool_from_nexus", hotreload)
+        self.assertIn("create_hotreload_update_record", hotreload)
+        # 平台文档里的硬规则要落到参考资料里，避免执行时漏掉参数或顺序。
+        self.assertIn("hot-upgrade.tar", hotreload)
+        self.assertIn("--unset-env", hotreload)
+        self.assertIn("一个容器/Pod 只热更新一个模块", hotreload)
+        self.assertIn("重构", hotreload)
+        # 父组件回退：唯一候选直接做，多个候选才跳过。
+        self.assertIn("只有一个**父组件候选 → **直接执行**", hotreload)
+        self.assertIn("更新记录挂在其父组件", hotreload)
+        self.assertNotIn("不允许替用户确认", hotreload)
+        # 地址只能来自方案提取结果：文档里必须写明不许自己拼。
+        self.assertIn("不许自己拼", hotreload)
+        # 热更新失败不回滚、不判失败，只如实说明。
+        self.assertIn("不回滚", hotreload)
+
+    def test_hot_reload_documented_before_cleanup(self):
+        """顺序不能搞反：热更新要读检出目录里的部署文件与制品，必须排在清理检出目录之前。"""
+        hotreload = (SKILL_DIR / "references" / "hotreload.md").read_text(encoding="utf-8")
+        skill = (SKILL_DIR / "SKILL.md").read_text(encoding="utf-8")
+        runtime = (SKILL_DIR / "runtime.json").read_text(encoding="utf-8")
+
+        self.assertIn("热更新必须发生在**清理检出目录之前**", hotreload)
+        self.assertIn("先别删检出目录", skill)
+        # 提示词里 cleanup 必须排在热更新之后。
+        self.assertLess(runtime.index("热更新（见 SKILL.md §3.8）"), runtime.index("cleanup --verify-remote"))
+
+    def test_skill_documents_hot_reload_stage(self):
+        """SKILL.md 要写明热更新阶段的位置、地址来源与兄弟技能路径。"""
+        text = (SKILL_DIR / "SKILL.md").read_text(encoding="utf-8")
+
+        self.assertIn("### 3.8 热更新到流水线环境", text)
+        self.assertIn("plan.mjs pipeline", text)
+        self.assertIn("devops-mcp-invoker", text)
+        self.assertIn("/data/skills", text)
+
+    def test_abort_requires_started_heartbeat(self):
+        """中断用的 fail 需要状态文件：文档必须说明未启动过心跳时先补一次 start。"""
+        text = (SKILL_DIR / "SKILL.md").read_text(encoding="utf-8")
+
+        self.assertIn("状态文件不存在", text)
+        self.assertIn("先补一次 `start` 再中断", text)
+        # 心跳启动位置固定，不能让 agent 提前重复 start（会跑出多个后台心跳）。
+        self.assertIn("不要把心跳抢到 §3.5 之前启动", text)
+
+    def test_runtime_prompt_mentions_hot_reload(self):
+        """运行提示词要把热更新纳入流程，并声明缺凭据时不算任务失败。"""
+        prompt = (SKILL_DIR / "runtime.json").read_text(encoding="utf-8")
+
+        self.assertIn("热更新", prompt)
+        self.assertIn("DEVOPS_MCP_TOKEN", prompt)
+        self.assertIn("hotreload.md", prompt)
 
 
 @unittest.skipUnless(NODE, "未安装 node，跳过技能脚本测试")
@@ -225,6 +288,115 @@ class PlanExtractionTests(unittest.TestCase):
         missing = run_node("plan.mjs", "find", empty)
         self.assertEqual(missing.returncode, 1)
         self.assertEqual(json.loads(missing.stdout)["reason"], "attachment-not-found")
+
+
+@unittest.skipUnless(NODE, "未安装 node，跳过技能脚本测试")
+class PipelineExtractionTests(unittest.TestCase):
+    """plan.mjs pipeline：从开发方案里提取热更新用的流水线环境地址。"""
+
+    # 方案里的流水线地址：一条带 /application 尾巴，一条同项目不同环境，一条缺 env。
+    PLAN_WITH_PIPELINES = "\n".join(
+        [
+            "# 开发方案：购物车支持批量删除",
+            "",
+            "- 仓库：shop/cart-service",
+            "- 目标分支：release/2.4",
+            "- 测试环境：https://devops.ks1.wezhuiyi.com/pipeline/project/10000054/release/20000526/env/30035160/application",
+            "- 预发环境：https://devops.ks1.wezhuiyi.com/pipeline/project/10000054/release/20000526/env/30035161",
+            "- 项目首页（没有环境，不构成候选）：https://devops.ks1.wezhuiyi.com/pipeline/project/10000054/release/20000526",
+            "",
+        ]
+    )
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+
+    def write(self, name: str, text: str) -> Path:
+        """在临时目录里落一个方案文件并返回路径。"""
+        target = self.root / name
+        target.write_text(text, encoding="utf-8")
+        return target
+
+    def test_pipeline_extracts_host_project_and_env(self):
+        """带 /application 尾巴的完整地址要原样保留，并拆出项目、发布单与环境 id。"""
+        plan = self.write("plan.md", self.PLAN_WITH_PIPELINES)
+
+        result = run_node("plan.mjs", "pipeline", plan)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertTrue(payload["ok"])
+        by_env = {item["envId"]: item for item in payload["pipelines"]}
+        self.assertEqual(set(by_env), {"30035160", "30035161"})
+        target = by_env["30035160"]
+        self.assertEqual(target["host"], "devops.ks1.wezhuiyi.com")
+        self.assertEqual(target["projectId"], "10000054")
+        self.assertEqual(target["releaseId"], "20000526")
+        self.assertTrue(target["url"].endswith("/env/30035160/application"))
+
+    def test_pipeline_skips_entries_without_env(self):
+        """只有 /pipeline/project 没有 /env 的写法定位不到环境，不能当成候选。"""
+        plan = self.write(
+            "no-env.md",
+            "开发方案\n\n环境：https://devops.ks1.wezhuiyi.com/pipeline/project/10000054/release/20000526\n",
+        )
+
+        result = run_node("plan.mjs", "pipeline", plan)
+
+        # 拿不到地址不是任务失败：代码已经推送完成，退出码必须保持 0。
+        self.assertEqual(result.returncode, 0, result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["reason"], "pipeline-not-found")
+        self.assertEqual(payload["pipelines"], [])
+
+    def test_pipeline_missing_address_keeps_exit_code_zero(self):
+        """方案完全没写流水线地址时同样只报 ok:false，不能反过来把任务判失败。"""
+        plan = self.write("plain.md", PLAN_READY)
+
+        result = run_node("plan.mjs", "pipeline", plan)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(json.loads(result.stdout)["ok"])
+
+    def test_pipeline_dedupes_and_upgrades_relative_path(self):
+        """同一环境重复出现只留一条并计数；先写纯路径后写完整地址时要补上主机名。"""
+        plan = self.write(
+            "dup.md",
+            "\n".join(
+                [
+                    "开发方案",
+                    "- 环境：/pipeline/project/10000054/release/20000526/env/30035160",
+                    "- 环境：https://devops.ks1.wezhuiyi.com/pipeline/project/10000054/release/20000526/env/30035160",
+                    "- 环境：https://devops.ks1.wezhuiyi.com/pipeline/project/10000054/release/20000526/env/30035160/application",
+                    "",
+                ]
+            ),
+        )
+
+        payload = json.loads(run_node("plan.mjs", "pipeline", plan).stdout)
+
+        self.assertEqual(len(payload["pipelines"]), 1)
+        self.assertEqual(payload["pipelines"][0]["count"], 3)
+        self.assertEqual(payload["pipelines"][0]["host"], "devops.ks1.wezhuiyi.com")
+        self.assertTrue(payload["pipelines"][0]["url"].startswith("https://"))
+
+    def test_candidates_also_returns_pipelines(self):
+        """candidates 顺带返回 pipelines，读方案那一步一次就能拿全仓库、分支与环境。"""
+        plan = self.write("plan.md", self.PLAN_WITH_PIPELINES)
+
+        result = run_node("plan.mjs", "candidates", plan)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertTrue(payload["ok"])
+        self.assertEqual(
+            {item["envId"] for item in payload["pipelines"]}, {"30035160", "30035161"}
+        )
+        # 顺带字段不能影响原有的仓库/分支判定。
+        self.assertEqual(payload["pairs"][0]["repo"], "shop/cart-service")
 
 
 @unittest.skipUnless(NODE and GIT, "未安装 node/git，跳过 Git 流程测试")

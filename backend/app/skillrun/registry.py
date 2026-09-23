@@ -34,6 +34,14 @@ def _strip_quotes(value: str) -> str:
     return text
 
 
+def _strip_block_indicator(value: str) -> str:
+    """去掉 YAML 块标量指示符（>、| 及其 +/- 结尾变体），只保留真正的值。"""
+    text = value.strip()
+    if text and text[0] in (">", "|"):
+        return text[1:].lstrip("+-").strip()
+    return text
+
+
 def parse_front_matter(text: str) -> dict:
     """解析 SKILL.md 顶部的 front matter，返回 name、description 等元数据。"""
     lines = str(text or "").splitlines()
@@ -55,7 +63,7 @@ def parse_front_matter(text: str) -> dict:
         if not separator:
             continue
         current_key = key.strip()
-        metadata[current_key] = _strip_quotes(value)
+        metadata[current_key] = _strip_block_indicator(_strip_quotes(value))
     return metadata
 
 

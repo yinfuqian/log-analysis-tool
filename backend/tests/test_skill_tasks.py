@@ -159,6 +159,39 @@ class SkillTaskTests(unittest.TestCase):
                 self.app.config.pop("CODEX_SKILL_TIMEOUT", None)
             else:
                 self.app.config["CODEX_SKILL_TIMEOUT"] = original
+
+    def test_registers_devops_mcp_config_before_running(self):
+        """配置了 DEVOPS_MCP_TOKEN 时，任务开跑前会把流水线 MCP 写进 CODEX_HOME/config.toml。"""
+        import tomllib
+        from app.skillrun.codex_runner import CodexRunResult
+
+        home = tempfile.TemporaryDirectory()
+        self.addCleanup(home.cleanup)
+        self.app.config["CODEX_HOME"] = home.name
+        self.app.config["DEVOPS_MCP_URL"] = "https://devops.ks1.wezhuiyi.com/mcp"
+        self.app.config["DEVOPS_MCP_TOKEN"] = "token-for-test-1234"
+        self.addCleanup(self.app.config.pop, "DEVOPS_MCP_TOKEN", None)
+
+        self.run_task(CodexRunResult(exit_code=0, last_message="已完成", duration_ms=100))
+
+        document = tomllib.loads((Path(home.name) / "config.toml").read_text(encoding="utf-8"))
+        server = document["mcp_servers"]["pipeline-integration-mcp"]
+        self.assertEqual(server["url"], "https://devops.ks1.wezhuiyi.com/mcp")
+        self.assertEqual(server["http_headers"]["X-User-Tokens"], "token-for-test-1234")
+
+    def test_no_mcp_config_when_token_absent(self):
+        """没配令牌时不写 MCP 配置，免得留下一个连不通的 server。"""
+        from app.skillrun.codex_runner import CodexRunResult
+
+        home = tempfile.TemporaryDirectory()
+        self.addCleanup(home.cleanup)
+        self.app.config["CODEX_HOME"] = home.name
+        self.app.config.pop("DEVOPS_MCP_TOKEN", None)
+
+        self.run_task(CodexRunResult(exit_code=0, last_message="已完成", duration_ms=100))
+
+        self.assertFalse((Path(home.name) / "config.toml").exists())
+
     def test_non_zero_exit_marks_record_as_failed(self):
         """Codex 非零退出时记录状态为失败。"""
         from app.skillrun import store

@@ -39,6 +39,10 @@ services:
       GIT_USER: ${GIT_USER:-}
       GIT_PASSWORD: ${GIT_PASSWORD:-}
       GITLAB_PRIVATE_TOKEN: ${GITLAB_PRIVATE_TOKEN:-}
+      # 流水线 MCP：jira-code 的热更新阶段通过 pipeline-integration-mcp 调用流水线平台接口。
+      # 令牌在流水线平台个人中心签发，只写进 CODEX_HOME 卷内的 config.toml；留空时不注册 MCP，热更新按跳过处理。
+      DEVOPS_MCP_URL: ${DEVOPS_MCP_URL:-https://devops.ks1.wezhuiyi.com/mcp}
+      DEVOPS_MCP_TOKEN: ${DEVOPS_MCP_TOKEN:-}
     command:
       - gunicorn
       - -w
@@ -100,6 +104,10 @@ services:
       GIT_USER: ${GIT_USER:-}
       GIT_PASSWORD: ${GIT_PASSWORD:-}
       GITLAB_PRIVATE_TOKEN: ${GITLAB_PRIVATE_TOKEN:-}
+      # 流水线 MCP：jira-code 的热更新阶段通过 pipeline-integration-mcp 调用流水线平台接口。
+      # 令牌在流水线平台个人中心签发，只写进 CODEX_HOME 卷内的 config.toml；留空时不注册 MCP，热更新按跳过处理。
+      DEVOPS_MCP_URL: ${DEVOPS_MCP_URL:-https://devops.ks1.wezhuiyi.com/mcp}
+      DEVOPS_MCP_TOKEN: ${DEVOPS_MCP_TOKEN:-}
     command:
       - celery
       - -A
@@ -159,6 +167,10 @@ services:
       GIT_USER: ${GIT_USER:-}
       GIT_PASSWORD: ${GIT_PASSWORD:-}
       GITLAB_PRIVATE_TOKEN: ${GITLAB_PRIVATE_TOKEN:-}
+      # 流水线 MCP：jira-code 的热更新阶段通过 pipeline-integration-mcp 调用流水线平台接口。
+      # 令牌在流水线平台个人中心签发，只写进 CODEX_HOME 卷内的 config.toml；留空时不注册 MCP，热更新按跳过处理。
+      DEVOPS_MCP_URL: ${DEVOPS_MCP_URL:-https://devops.ks1.wezhuiyi.com/mcp}
+      DEVOPS_MCP_TOKEN: ${DEVOPS_MCP_TOKEN:-}
     command:
       - sh
       - -c

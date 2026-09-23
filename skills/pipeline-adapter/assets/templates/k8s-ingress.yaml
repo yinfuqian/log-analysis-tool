@@ -1,0 +1,27 @@
+{% if config["ingress-enable"] == True  %} # 判断ingress是否开启
+# TODO 根据自身情况合理采用ingress，如果不需要ingress，则无需该文件
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{REPO_GROUP}}-{{REPO_NAME}}-ingress # TODO ingress资源名字，建议格式： 代码仓库组-代码仓库-ingress
+  labels:
+    # TODO 建议取deployment的标签一致
+    app.kubernetes.io/code-repo: {{REPO_GROUP}}_{{REPO_NAME}} # 模块代码仓库，如代码仓库为demo/go-demo，则这里写demo_go-demo
+    app.kubernetes.io/name: {{REPO_GROUP}}_{{REPO_NAME}}  # app名字, 格式为： 代码仓库组_代码仓库，Eg:demo_go-demo
+    app.kubernetes.io/component: application
+    app.kubernetes.io/part-of: {{MODULE_GROUP}} # 顶级应用名字，这里写产品名字，bot、call、learn
+spec:
+  rules:
+    - host: {% if config["ingress-domain-suffix"] != "" %}{{REPO_NAME}}-{{ config["namespace-hash"] | default('') }}.{{ config["ingress-domain-suffix"] | default('') }}{% else %}{{REPO_NAME}}-{{ config["namespace-hash"] | default('') }}{% endif %}  # TODO 取一键部署里面的域名配置
+      http:
+        paths:
+          - path: / #无特殊情况均使用/既可
+            pathType: Prefix
+            backend:
+              service:
+                # TODO: serviceName的value要修改为对应service的名字，请一定要与你*.service.yaml中metadata.name的名字保持一致
+                name: "{{ env['{{REPO_NAME}}-svc'] | default('{{REPO_GROUP}}-{{REPO_NAME}}-svc') }}" # 后台service的名字，对应*.service.yaml里面的metadata.name
+                port:
+                  # TODO 注意，k8s的yaml所有端口的配置的默认值必须是int值如8080，不能是'8080'
+                  number: {{ env['{{REPO_NAME}}-server-port'] | default({{SERVER_PORT}}) }} # 代理到svc的端口，必须是int
+{% endif %}

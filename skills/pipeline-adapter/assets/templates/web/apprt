@@ -1,0 +1,52 @@
+#!/bin/bash
+# apprt
+# apprt 文件用于容器非 root 启动的入口，请再加入该脚本的之前，首先确认服务基础镜像必须含有 gosu 的二进制文件来支持非 root 启动
+
+set -e
+WORKDIR="$( cd "$( dirname "$0"  )" && pwd  )/.." # 获取脚本所在的路径
+WORKDIR="$(realpath ${WORKDIR})"
+
+function env_check(){
+    local exit_ var_
+    exit_=false
+    for var_ in "${@}";do
+        if [[ -z "$(eval echo '$'"${var_}")" ]];then
+             echo "${var_} is empty."
+             exit_=true
+        fi
+    done
+    if $exit_;then
+        exit 1
+    fi
+}
+
+start_service(){
+    reverse_proxy="${WORKDIR}/share/nginx/sbin/nginx"
+    if [ "${REVERSE_PROXY}" = "tong-httpserver" ];then
+        reverse_proxy="${WORKDIR}/share/tong-httpserver/bin/nginx"
+    fi
+    source /etc/profile && ${reverse_proxy} -p "${WORKDIR}"/share/nginx -g "daemon off;"
+}
+
+env_check USER_ID GROUP_ID
+#TODO: 自定义用户
+RUN_USER="ops"
+mkdir -p "${WORKDIR}"/lib/dist
+tar -xf "${WORKDIR}"/lib/dist.tar.gz -C "${WORKDIR}"/lib/dist
+if [[ "$(id -u)" == "0" ]] && [[ "${USER_ID}" != "0" ]]; then
+    if ! id ${RUN_USER};then
+        adduser -u "${USER_ID}" ${RUN_USER} -D
+    fi
+    #TODO: 需授权的文件夹，非 root 用户执行时需增加, DIST 文件较多时，可以使用以下 gosu 解压方案
+    chown -R "${USER_ID}":"${GROUP_ID}" "${WORKDIR}"
+    if [[ ! -f "${WORKDIR}"/share/nginx/conf/conf.d/{{MODULE_NAME}}.conf ]]; then
+        mkdir -p "${WORKDIR}"/share/nginx/conf/conf.d
+        export DIST_DIR="${WORKDIR}"/lib
+        envsubst < "${WORKDIR}"/etc/custom.conf.template > "${WORKDIR}"/share/nginx/conf/conf.d/{{MODULE_NAME}}.conf
+    fi
+    sed -i "s/user  nginx;/user  ${RUN_USER};/g" "${WORKDIR}"/share/nginx/conf/nginx.conf
+    exec gosu ${USER_ID}:${GROUP_ID} "${0}" "${@}"
+fi
+
+# 普通用户处理逻辑
+start_service

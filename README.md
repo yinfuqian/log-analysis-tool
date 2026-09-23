@@ -305,8 +305,12 @@ powershell -ExecutionPolicy Bypass -File scripts\export_release_image.ps1 `
 作为附件上传到需求单，文件名以「宋立志」结尾；交付完成后清理本次任务的工作区中间产物）、
 `review-jira-songlizhi`（按 OpenSpec 好需求标准评审需求质量，
 产出 Markdown 报告，对 Jira 只读）与 `jira-code`（读取需求单的「开发方案」附件，从方案指定的基线分支拉出
-`feature/<单号>` 分支，按方案实现代码并推送到远端，推送成功后清理本地检出目录；进度与异常都只更新在同一条
-Jira 评论上；既不改单据状态，也不上传附件）。
+`feature/<单号>` 分支，按方案实现代码并推送到远端；进度与异常都只更新在同一条
+Jira 评论上；既不改单据状态，也不上传附件；推送完成后按方案里写的**流水线环境地址**做**热更新**，
+热更新处理完再清理本地检出目录（顺序不能反：热更新要读检出目录里的部署文件与构建产物），
+流程以 `devops-mcp-invoker` 技能为准）。另外内置 `devops-mcp-invoker`（把自然语言请求转换成对远端
+MCP server `pipeline-integration-mcp` 的有序调用）与 `pipeline-adapter`（仓库/模块接入追一 CI/CD 流水线 v3
+所需的 `ci.yaml`、`app.json`、Dockerfile、K8S 编排等），两者都是流程与模板文档型技能。
 
 ### 接口一览
 
@@ -386,6 +390,8 @@ curl -H "X-API-Token: <SKILL_API_TOKEN>" http://127.0.0.1:5000/skill/task/SKL-8F
 | `GITLAB_PRIVATE_TOKEN` | 无 | `jira-code` 拉分支与推送代码用的 GitLab 令牌，需要仓库写权限；缺失时技能只会中断并如实上报 |
 | `GIT_BASE_URL` | 无 | GitLab 站点地址；方案里只写 `group/repo` 时用它补全克隆地址 |
 | `GIT_USER`、`GIT_PASSWORD` | 无 | 没有 `GITLAB_PRIVATE_TOKEN` 时的账号密码兜底 |
+| `DEVOPS_MCP_TOKEN` | 无 | 流水线平台个人中心签发的 API Token；`jira-code` 的热更新阶段用它调 `pipeline-integration-mcp`，缺失时后端不注册 MCP，技能按「跳过并说明」处理 |
+| `DEVOPS_MCP_URL` | `https://devops.ks1.wezhuiyi.com/mcp` | 流水线 MCP server 地址，由后端写进 `CODEX_HOME/config.toml` |
 | `ANALYSIS_API_BASE_URL` | `http://api:5000` | `jira-gate-bug` 回写时调用的本服务地址（宿主网络改为 `http://127.0.0.1:5000`） |
 | `ANALYSIS_API_TOKEN` | `local-dev-analysis-token` | 技能脚本调用 `/analysis`、`/logfile` 等接口的内部令牌；生产环境必须替换 |
 
@@ -406,9 +412,13 @@ Codex 自己生成的状态文件全部落在 `codex-home` 卷（本地运行对
 docker compose exec worker node /data/skills/jira-gate-1/scripts/jira-cli.mjs selftest
 # jira-code 额外自检 GitLab 凭据（只回显来源，不打印令牌）
 docker compose exec worker node /data/skills/jira-code/scripts/git-flow.mjs creds
+# 配了 DEVOPS_MCP_TOKEN 时确认 MCP 已注册（看不出内容说明令牌没写进去）
+docker compose exec worker sh -c 'grep -c pipeline-integration-mcp /data/codex/config.toml'
 ```
 
 - API 只负责提交任务，Codex 实际执行发生在 `worker` 容器，请确保 `worker` 能访问 Jira 与模型中转。
+- 要走 `jira-code` 的热更新，`worker` 还需要能访问 `devops.ks1.wezhuiyi.com`（流水线 MCP）与
+  `pkg.in.wezhuiyi.com`（热更新工具下载与制品上传）；只做代码推送不需要这两个域名。
 - 技能任务与日志分析共享 `worker` 并发槽位，单次技能可能运行数分钟；并发要求高时可单独部署一个监听同一队列的 Worker，或调整 `CELERY_WORKER_CONCURRENCY`。
 - 技能工作目录保留在 `skill-workspace` 卷中便于排查，长期运行请按需清理。
 
@@ -429,6 +439,7 @@ Copy-Item .env.example backend\.env
 - 数据库与 Redis：`MYSQL_HOST`、`MYSQL_PORT`、`MYSQL_DATABASE`、`MYSQL_USERNAME`、`MYSQL_PASSWORD` 指向可用的 MySQL 实例；`REDIS_HOST`、`REDIS_PORT` 指向可用的 Redis。应用默认按这组参数拼装 `SQLALCHEMY_DATABASE_URI`，无需手写连接串。
 - 必填密钥：`JIRA_TOKEN`、`CODEX_API_KEY`。其余技能配置（含 `CODEX_MODEL`、`CODEX_BASE_URL`、`SKILL_API_TOKEN`、`JIRA_BASE_URL`）均已内置可用默认值。
 - 要跑 `jira-code` 才需要额外配置 `GITLAB_PRIVATE_TOKEN`（需仓库写权限）与 `GIT_BASE_URL`；不填也能启动服务，只是该技能会中断并说明缺少凭据。
+- `jira-code` 的热更新阶段需要 `DEVOPS_MCP_TOKEN`（流水线平台个人中心签发）；不填时热更新会跳过并在评论里说明，代码推送不受影响。`DEVOPS_MCP_URL` 有内置默认值，通常不用改。
 - 本地路径：把 `LOCAL_STORAGE_DIR`、`LOG_DIR` 改成本机可写目录，不要沿用容器内的 `/data/...` 路径。
 
 3. 建表（与生产同一套迁移）：
@@ -482,7 +493,10 @@ node ..\skills\jira-gate-bug\scripts\analysis-cli.mjs render --input <结果JSON
 
 - `jira-gate-1` 在达标与不达标两种情况下都会**真实写入 Jira 评论**（内容是逐项打标记的检查项清单）。本地验证请使用测试单或临时项目单，不要拿正式需求单试跑。
 - `jira-code` 会真实创建分支、写代码并把提交**推送到远端仓库**（同时真实写一条评论）。本地验证请用测试仓库与测试单，不要指向业务主干仓库。
-  推送成功后技能会删掉工作区里的检出目录；推送失败或还有未推送提交时则会保留，便于继续排查。
+  热更新处理完之后技能会删掉工作区里的检出目录；推送失败或还有未推送提交时则会保留，便于继续排查。
+  方案里写了流水线地址且配置了 `DEVOPS_MCP_TOKEN` 时，技能还会**真实热更新目标环境**（UAT 与 binary 环境会被拒绝，
+  环境里只有唯一父组件候选时会把更新记录挂在父组件下并在评论里注明，多个候选才跳过）；本地验证请指向测试环境。
+  热更新成功后记得按技能的评论提示关掉热加载：PaaS 用当前版本重新部署一次，K8S 点流水线界面的「重构」。
 - `jira-gate-bug` 同样会真实写评论；没有自查结果时还会上传 HTML 报告附件并消耗一次完整的故障分析（拉代码 + 模型推理）。本地验证请使用测试缺陷单。
 - 异步分析依赖 Redis：`/health/ready` 的 `checks.redis` 必须是 `ok`，否则 `/analysis/submit_async` 无法入队（技能第 3 步会失败）。上传与分析提交本身不依赖 Redis 之外的组件。
 - 未配置 `LOCAL_OCR_ENABLED=true` 时图片识别走多模态模型；本地 `.env` 若仍写着 `true`，可用会话变量覆盖（`$env:LOCAL_OCR_ENABLED = "false"`），根 `.env` 的值不会覆盖已有环境变量。

@@ -1,0 +1,22 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: "{{ env['{{REPO_NAME}}-svc'] | default('{{REPO_GROUP}}-{{REPO_NAME}}-svc') }}"
+  labels:
+    app.kubernetes.io/code-repo: {{REPO_GROUP}}_{{REPO_NAME}} # 模块代码仓库，如代码仓库为demo/go-demo，则这里写demo_go-demo
+    app.kubernetes.io/name: {{REPO_GROUP}}_{{REPO_NAME}}  # app名字, 格式为： 代码仓库组_代码仓库，Eg:demo_go-demo
+    app.kubernetes.io/component: application
+    app.kubernetes.io/part-of: {{MODULE_GROUP}} # 顶级应用名字，这里写产品名字，bot、call、learn
+spec:
+  type: ClusterIP # TODO 根据实际情况选择 ClusterIP 或者 NodePort
+  ports:
+    # 根据具体情况添加配置
+    # TODO 注意，k8s的yaml所有端口的配置的默认值必须是int值如8080，不能是'8080'
+    # TODO: 端口配置必须与 deployment 中的容器端口保持一致
+    - port: {{ env['{{REPO_NAME}}-server-port'] | default({{SERVER_PORT}}) }}  # Service监听的端口，对应ClusterIP，必须是int
+      name: http  #端口名称
+      targetPort: {{ env['{{REPO_NAME}}-server-port'] | default({{SERVER_PORT}}) }} # 对应pod中容器的端口，必须与 deployment 中的 port 一致，必须是int
+      # nodePort: {{ env['{{REPO_NAME}}-node-port'] | default(49160) }} # NodePort 类型下可以指定49160以上的端口, 此时 type: ClusterIP 应改为 type: NodePort
+  selector:
+    # TODO 根据实际情况修改
+    app.kubernetes.io/name: {{REPO_GROUP}}_{{REPO_NAME}}  # app名字, 格式为： 代码仓库组_代码仓库，Eg:demo_go-demo

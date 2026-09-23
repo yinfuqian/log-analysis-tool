@@ -92,6 +92,8 @@ DEFAULT_SKILL_URL_ALLOWED_HOSTS = "jira.in.wezhuiyi.com"
 DEFAULT_CODEX_HOME = "/data/codex"
 DEFAULT_CODEX_MODEL = "codex/deepseek-flash"
 DEFAULT_CODEX_BASE_URL = "https://newapi.in.wezhuiyi.com/v1"
+# 流水线 MCP server：jira-code 的热更新阶段通过它调用平台接口（见 devops-mcp-invoker 技能）。
+DEFAULT_DEVOPS_MCP_URL = "https://devops.ks1.wezhuiyi.com/mcp"
 
 
 def _env_or(name: str, default: str) -> str:
@@ -241,6 +243,9 @@ class Config:
     # 单次技能执行超时秒数：留空表示按技能自身 runtime.json 的 timeout_seconds 决定（未声明时 1800），
     # 显式配置则覆盖全部技能，便于运维统一收紧或放宽。jira-code 声明 7200，jira-defect-gate 声明 3600。
     CODEX_SKILL_TIMEOUT = _optional_int("CODEX_SKILL_TIMEOUT")
+    # 流水线 MCP：由后端写进 CODEX_HOME/config.toml 供热更新类技能调用；未配置令牌时不注册。
+    DEVOPS_MCP_URL = _env_or("DEVOPS_MCP_URL", DEFAULT_DEVOPS_MCP_URL)
+    DEVOPS_MCP_TOKEN = os.getenv("DEVOPS_MCP_TOKEN", "")
     # 连续多少次网络错误后提前判定模型/Jira 不可达，避免空转到超时。
     CODEX_NETWORK_RETRY_LIMIT = int(_env_or("CODEX_NETWORK_RETRY_LIMIT", "10"))
     # worker 启动时是否把上一次运行遗留的“执行中”任务标记为失败。

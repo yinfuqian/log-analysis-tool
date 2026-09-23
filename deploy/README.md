@@ -104,6 +104,10 @@ CODEX_BASE_URL=https://newapi.in.wezhuiyi.com/v1
 # jira-code 拉分支、推送代码用的 GitLab 凭据（令牌需要仓库写权限）与站点地址
 GITLAB_PRIVATE_TOKEN=请填写
 GIT_BASE_URL=https://code.in.wezhuiyi.com/
+# jira-code 热更新用的流水线平台令牌（个人中心签发）；不填时热更新会跳过并在 Jira 评论里说明
+DEVOPS_MCP_TOKEN=请填写
+# 流水线 MCP server 地址，有默认值，通常不用改
+DEVOPS_MCP_URL=https://devops.ks1.wezhuiyi.com/mcp
 ```
 
 部署后自检：
@@ -114,6 +118,9 @@ docker compose --env-file .env.production -f docker-compose.prod.yml exec worker
 # jira-code 额外自检 GitLab 凭据（只回显来源，不打印令牌）
 docker compose --env-file .env.production -f docker-compose.prod.yml exec worker \
   node /data/skills/jira-code/scripts/git-flow.mjs creds
+# 配了 DEVOPS_MCP_TOKEN 时确认流水线 MCP 已写进 Codex 配置
+docker compose --env-file .env.production -f docker-compose.prod.yml exec worker \
+  sh -c 'grep -c pipeline-integration-mcp /data/codex/config.toml'
 curl -H "X-API-Token: <SKILL_API_TOKEN>" http://127.0.0.1:5000/skill/list
 ```
 

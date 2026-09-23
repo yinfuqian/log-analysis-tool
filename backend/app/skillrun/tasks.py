@@ -10,7 +10,7 @@ from sqlalchemy import text
 
 from extensions import celery, db
 
-from . import codex_runner, store
+from . import codex_runner, mcp_config, store
 from .models.model import SkillRunRecord
 from .registry import SkillError, resolve_skill
 
@@ -149,6 +149,13 @@ def run_skill_task(self, record_id: int):
             os.makedirs(codex_home, exist_ok=True)
         except OSError as exc:
             logging.warning("无法创建 CODEX_HOME 目录 %s：%s", codex_home, exc)
+    # 流水线 MCP：无头 codex exec 每次都是新进程，配置写在 CODEX_HOME 里即可生效，不需要重启会话。
+    # 未配置 DEVOPS_MCP_TOKEN 时这里不会写入任何东西，热更新阶段会如实报告缺少凭据。
+    mcp_config.ensure_devops_mcp_config(
+        codex_home,
+        url=str(config.get("DEVOPS_MCP_URL") or ""),
+        token=str(config.get("DEVOPS_MCP_TOKEN") or ""),
+    )
     env = codex_runner.build_codex_env(
         os.environ,
         api_key=api_key,

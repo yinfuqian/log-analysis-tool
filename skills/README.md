@@ -29,7 +29,9 @@ skills/
 
 - `jira-gate-1`：Jira 需求准入检查（G1），产出难度分级与达标结论，把逐项打标记的检查项清单写入需求单评论；不达标时流转到「评审中」并在评论里 @ 流转人；最后调用 `review-jira-songlizhi` 生成 OpenSpec 评审报告，作为附件上传到需求单（文件名以「宋立志」结尾）。交付全部完成后用 `scripts/workdir-cleanup.mjs --key <KEY>` 清理本次任务的工作区中间产物（附件与解压产物），`reports/` 不在清理范围内。
 - `review-jira-songlizhi`：按 OpenSpec 好需求标准评审需求质量，产出 Markdown 报告。**对 Jira 只读**，由 `jira-gate-1` 调用；报告落盘后由 `jira-gate-1` 的 `scripts/jira-cli.mjs attach` 上传为附件。
-- `jira-code`：读取需求单的「开发方案」附件，从方案指定的基线分支拉出 `feature/<单号>` 分支，按方案实现代码并推送到远端。进度与异常都只更新在同一条 Jira 评论上（评论带标记 `jira-code:progress:<KEY>`，默认每 5 分钟自动刷新）。推送成功后会把刚拉下来的检出目录删掉，不在技能工作区留代码副本。**对 Jira 只读不写状态**：不流转、不写自定义字段、不上传附件；方案里读不到仓库或分支时会在评论里说明并中断。
+- `jira-code`：读取需求单的「开发方案」附件，从方案指定的基线分支拉出 `feature/<单号>` 分支，按方案实现代码并推送到远端；推送完成后按方案里写的**流水线环境地址**做**热更新**（走 `pipeline-integration-mcp`，流程以 `devops-mcp-invoker` 为准）。顺序固定为「推送 → 热更新 → 清理检出目录」：热更新要用检出目录里的部署文件（`docker-compose.yml` / `deployments/kubernetes/*.yaml`）和刚构建的制品，先删目录就传不了。进度与异常都只更新在同一条 Jira 评论上（评论带标记 `jira-code:progress:<KEY>`，默认每 5 分钟自动刷新）。热更新处理完之后会把刚拉下来的检出目录删掉，不在技能工作区留代码副本。**对 Jira 只读不写状态**：不流转、不写自定义字段、不上传附件；方案里读不到仓库或分支时会在评论里说明并中断。
+- `devops-mcp-invoker`：流程控制型技能，把自然语言请求转换成对远端 MCP server `pipeline-integration-mcp` 的有序调用（编译结果、日志、环境升级、模块热更新等）。只提供流程与约束文档，不执行写操作；`jira-code` 的热更新阶段严格按它的 `SKILL.md` 与 `references/REFERENCES-HOTRELOAD.md` 执行，两者唯一的差异是模块匹配到父组件的处理：交互式流程会问人，`jira-code` 无人值守，只有唯一父组件候选时直接做并在评论与更新记录里注明，多个候选才跳过。
+- `pipeline-adapter`：把仓库/模块接入追一科技 CI/CD 流水线（编译与部署分离 v3），生成 `ci.yaml`、`app.json`、`Dockerfile`、K8S 编排与 sonar 配置等。纯文档 + 模板 + 校验脚本，**不碰 Jira**，由人工或其它技能调用。
 
 ## 服务器环境说明
 
@@ -37,7 +39,9 @@ skills/
 
 技能目录在容器内只读挂载到 `/data/skills`，因此 `jira-gate-1` 统一用绝对路径 `/data/skills/review-jira-songlizhi` 调用另一个技能；`review-jira-songlizhi` 的产物落在技能工作区（`/data/skill-workspace/reports/`），不写进技能目录。`review-jira-songlizhi` 读 `JIRA_PAT`，容器里注入的是 `JIRA_TOKEN`，调用前按它的 `SKILL.md` 做凭据桥接。
 
-`jira-code` 的脚本入口是 `scripts/jira-cli.mjs`（Jira 读写评论）、`scripts/plan.mjs`（从方案文本里提取仓库与分支）、`scripts/git-flow.mjs`（建分支、提交、推送，推送成功后 `cleanup` 删除本地检出）、`scripts/progress.mjs`（维护那一条进度评论）。它需要 `GITLAB_PRIVATE_TOKEN`（仓库写权限）以及可选的 `GIT_BASE_URL`、`GIT_USER`、`GIT_PASSWORD`；令牌只作为本次 git 命令的临时参数传入，不会写进 `.git/config`，也不会打印到输出里。
+同理由 `jira-code` 引用的 `devops-mcp-invoker` 也用绝对路径访问：`/data/skills/devops-mcp-invoker/SKILL.md` 与 `/data/skills/devops-mcp-invoker/references/REFERENCES-HOTRELOAD.md`。跨技能引用一律走 `/data/skills/<skill_id>`，不要用相对路径。
+
+`jira-code` 的脚本入口是 `scripts/jira-cli.mjs`（Jira 读写评论）、`scripts/plan.mjs`（从方案文本里提取仓库、分支与流水线环境地址）、`scripts/git-flow.mjs`（建分支、提交、推送，推送成功后 `cleanup` 删除本地检出）、`scripts/progress.mjs`（维护那一条进度评论）。它需要 `GITLAB_PRIVATE_TOKEN`（仓库写权限）以及可选的 `GIT_BASE_URL`、`GIT_USER`、`GIT_PASSWORD`；热更新阶段还需要 `DEVOPS_MCP_TOKEN`（流水线平台个人中心签发）。令牌只作为本次 git 命令的临时参数传入，不会写进 `.git/config`，也不会打印到输出里；`DEVOPS_MCP_TOKEN` 由后端写进 `CODEX_HOME/config.toml` 的 MCP 配置，不进命令行、不进仓库。
 
 技能所需的令牌（例如 Jira 访问令牌）不要提交到仓库，部署时通过挂载文件或环境变量注入。
 

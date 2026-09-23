@@ -54,6 +54,14 @@ class SkillRegistryTests(unittest.TestCase):
         """没有 front matter 的文档返回空元数据而不是报错。"""
         self.assertEqual(parse_front_matter("# 只有正文\n"), {})
 
+    def test_parse_front_matter_strips_yaml_block_indicator(self):
+        """折叠块描述（description: >）不能把指示符当成描述内容，否则会原样显示到 /skill/list。"""
+        text = "---\nname: demo\ndescription: >\n  第一行\n  第二行\n---\n\n正文\n"
+
+        metadata = parse_front_matter(text)
+
+        self.assertEqual(metadata["description"], "第一行 第二行")
+
     def test_load_skill_reads_runtime_overrides(self):
         """runtime.json 可覆盖提示词模板、超时时间与必填输入。"""
         root = self.make_skills_root({"demo-skill": SAMPLE_SKILL})

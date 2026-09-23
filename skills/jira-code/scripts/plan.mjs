@@ -5,6 +5,7 @@
  * 用法：
  *   node scripts/plan.mjs find <附件目录> [--keyword 开发方案,技术方案]
  *   node scripts/plan.mjs candidates <方案文本文件> [--host https://code.in.wezhuiyi.com/]
+ *   node scripts/plan.mjs pipeline <方案文本文件>
  *
  * find        在附件目录里挑出「开发方案」文件（只按文件名与类型打分，不读内容），输出选中文件的绝对路径；
  *             没有候选时以退出码 1 结束，并在 stderr 说明目录里都有哪些文件。
@@ -12,6 +13,10 @@
  *             { ok, repos:[{url,host,path,raw,line,confidence}], branches:[{name,raw,line,confidence,preferred}],
  *               pairs:[{repo,branch,line,source}], reason }
  *             仓库候选或分支候选为空时 ok=false、退出码 1 —— 调用方据此中断流程，不许自己编仓库或分支。
+ * pipeline    在方案正文里扫出流水线环境地址（供热更新用），输出 JSON：
+ *             { ok, pipelines:[{url,host,projectId,releaseId,envId,line,raw}], reason }
+ *             本命令只做提取、不把关：没扫到时 ok=false 且**退出码仍为 0**，由技能决定是跳过热更新还是中断
+ *             （代码已经推上去了，这里不该反过来把整个任务判失败）。
  *
  * 设计口径：本脚本只做「候选提取」，不做判断。方案是自然语言，最终选哪一条由技能按 SKILL.md 的规则决定，
  * 但候选必须来自本脚本的输出，禁止凭空拼 URL 或分支名。
@@ -51,6 +56,16 @@ const EXPLICIT_REPO = /(?:仓库|代码库|代码仓|代码仓库|仓库路径|�
 // 表格写法：| 仓库 | shop/cart-service | 或 | 分支 | release/2.4 |
 const TABLE_REPO = /[|｜]\s*(?:仓库|代码库|代码仓|代码仓库|git\s*地址|项目)\s*[|｜]\s*([A-Za-z0-9][A-Za-z0-9._\/-]{1,120})/i;
 const TABLE_BRANCH = /[|｜]\s*(?:分支|目标分支|基线分支|branch)\s*[|｜]\s*([A-Za-z0-9][A-Za-z0-9._\/-]{1,120})/i;
+// 流水线环境地址：整段 token 匹配，保留方案里的原始写法（含尾部 /application 等路径）。
+// 例：https://devops.ks1.wezhuiyi.com/pipeline/project/10000054/release/20000526/env/30035160/application
+const PIPELINE_URL_TOKEN = /(https?:\/\/[^\s"'`<>（）()【】]*\/pipeline\/project\/\d+[^\s"'`<>（）()【】]*|\/pipeline\/project\/\d+[^\s"'`<>（）()【】]*)/gi;
+// 环境 id：同一条 token 里必须出现，缺它就无法定位要更新的环境。
+const PIPELINE_ENV = /\/env\/(\d+)/i;
+// 发布单 id：可选，仅用于回显。
+const PIPELINE_RELEASE = /\/release\/(\d+)/i;
+// 项目 id：从 token 里取，用于回显与去重。
+const PIPELINE_PROJECT = /\/pipeline\/project\/(\d+)/i;
+
 // 文档/代码后缀：只剔除这些明确是文件名的字符串；
 // release/2.4、feature/2.4 这类带点号的分支名是合法写法，不能按「带点号 = 文件」一律排除。
 const FILE_LIKE = /\.(?:md|markdown|txt|docx?|pdf|xlsx?|pptx?|png|jpe?g|gif|bmp|webp|svg|json|ya?ml|xml|html?|htm|csv|zip|rar|7z|tar|gz|tgz|java|kt|py|js|jsx|ts|tsx|vue|go|rs|c|cc|cpp|h|cs|rb|php|sql|sh|bat|ps1|gradle|properties|ini|conf|log)$/i;
@@ -237,6 +252,67 @@ function scan(text) {
 }
 
 
+
+/**
+ * 按行扫描方案正文，收集流水线环境地址候选。
+ * 只认「同一条 URL 片段里既有 /pipeline/project/<id> 又有 /env/<id>」的写法：缺 env 就无法定位要更新的环境，
+ * 宁可返回空让技能如实报告，也不猜一个环境 id。
+ */
+function scanPipelines(text) {
+  const lines = String(text || "").split(/\r?\n/);
+  const found = [];
+  const byKey = new Map();
+
+  lines.forEach((line, index) => {
+    const lineNo = index + 1;
+    // 每行单独建正则实例：带 g 的正则复用会保留 lastIndex，跨行匹配会漏。
+    const token = new RegExp(PIPELINE_URL_TOKEN.source, "gi");
+    let hit;
+    while ((hit = token.exec(line)) !== null) {
+      const raw = stripTail(hit[0]);
+      const projectMatch = PIPELINE_PROJECT.exec(raw);
+      // 只有 /pipeline/project 没有 /env：定位不到要更新的环境，跳过而不是猜一个。
+      const envMatch = PIPELINE_ENV.exec(raw);
+      if (!projectMatch || !envMatch) continue;
+      const releaseMatch = PIPELINE_RELEASE.exec(raw);
+      const projectId = projectMatch[1];
+      const envId = envMatch[1];
+
+      const key = `${projectId}/${envId}`;
+      const existing = byKey.get(key);
+      if (existing) {
+        existing.count += 1;
+        // 同一环境重复出现：保留更完整的那条写法。方案里先写纯路径、后写带主机的完整地址时，
+        // 只有补上主机名才能拼出可直接访问的 URL，否则技能拿到的是相对路径。
+        const laterHost = hostOf(raw);
+        if (!existing.host && laterHost) {
+          existing.url = raw;
+          existing.host = laterHost;
+          existing.raw = raw;
+          existing.line = lineNo;
+        }
+        if (!existing.releaseId && releaseMatch) existing.releaseId = releaseMatch[1];
+        continue;
+      }
+      const candidate = {
+        url: raw,
+        host: hostOf(raw) || null,
+        projectId,
+        releaseId: releaseMatch ? releaseMatch[1] : null,
+        envId,
+        line: lineNo,
+        raw,
+        count: 1,
+      };
+      byKey.set(key, candidate);
+      found.push(candidate);
+    }
+  });
+
+  return { pipelines: found.map(({ count, ...item }) => ({ ...item, count })) };
+}
+
+
 /** find 子命令：在附件目录里挑出开发方案文件。 */
 function pickPlanFile(directory, keywords) {
   const dir = resolve(directory);
@@ -325,6 +401,8 @@ function main() {
       repos: result.repos,
       branches: result.branches,
       pairs: result.pairs,
+      // 顺带带上流水线地址候选：热更新阶段要用，但它的缺失不影响仓库/分支的判定结果。
+      pipelines: scanPipelines(text).pipelines,
     };
     if (!result.repos.length) payload.reason = "repo-not-found";
     else if (!result.branches.length) payload.reason = "branch-not-found";
@@ -338,7 +416,21 @@ function main() {
     return;
   }
 
-  throw new Error("用法：node scripts/plan.mjs <find|candidates> ...");
+  if (command === "pipeline") {
+    const file = positional[0];
+    if (!file) throw new Error("用法：node scripts/plan.mjs pipeline <方案文本文件>");
+    const text = readFileSync(resolve(file), "utf8");
+    const { pipelines } = scanPipelines(text);
+    const payload = { ok: pipelines.length > 0, textSource: resolve(file), pipelines };
+    if (!pipelines.length) {
+      // 只做提取不把关：这里退出码仍是 0，由技能决定跳过热更新还是中断。
+      payload.reason = "pipeline-not-found";
+    }
+    process.stdout.write(JSON.stringify(payload, null, 2) + "\n");
+    return;
+  }
+
+  throw new Error("用法：node scripts/plan.mjs <find|candidates|pipeline> ...");
 }
 
 

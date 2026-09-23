@@ -1,0 +1,73 @@
+#!/bin/bash
+# apprt.sh
+# apprt.sh 文件用于容器非 root 启动的入口，请再加入该脚本的之前，首先确认服务基础镜像必须含有 gosu 的二进制文件来支持非 root 启动
+
+set -e
+WORKDIR="$( cd "$( dirname "$0"  )" && pwd  )" # 获取entrypoint.sh脚本所在的路径
+
+APP_NAME={{MODULE_NAME}}
+APP_EXEC_BINARY=${WORKDIR}/${APP_NAME}
+
+function env_check(){
+    local exit_ var_
+    exit_=false
+    for var_ in "${@}";do
+        if [[ -z "$(eval echo '$'"${var_}")" ]];then
+             echo "${var_} is empty."
+             exit_=true
+        fi
+    done
+    if $exit_;then
+        exit 1
+    fi
+}
+
+# TODO: 此处修改为启动服务的命令
+start_service(){
+    ${APP_EXEC_BINARY}
+}
+
+# =tar==================此中间部分脚本为tar包部署内容=======================tar=
+_help() {
+    echo "eg: bash deployments/binary/entrypoint.d/entrypoint.sh"
+    echo "eg: bash deployments/binary/entrypoint.d/entrypoint.sh local-binary"
+}
+
+local_binary_handle(){
+    # 本地运行所需要的环境变量
+    export SERVER_PORT="{{SERVER_PORT}}"
+    APP_EXEC_BINARY="./${APP_NAME}"
+}
+
+case $1 in
+--help | -h)
+    _help
+    exit 0
+    ;;
+local-binary)
+    local_binary_handle
+    start_service
+    exit 0
+    ;;
+*)
+    echo ""
+    ;;
+esac
+
+# =tar==================此中间部分脚本为tar包部署内容=======================tar=
+
+RUN_USER="appdeploy"
+env_check USER_ID GROUP_ID
+
+if [[ "$(id -u)" == "0" ]] && [[ "${USER_ID}" != "0" ]]; then
+    # TODO: 将需要访问的文件夹授权给运行用户和组这里，以下为示例
+    if type useradd >/dev/null 2>&1; then
+        id ${RUN_USER} >/dev/null 2>&1 || useradd -u "${USER_ID}" ${RUN_USER} && groupmod -g "${GROUP_ID}" ${RUN_USER}
+    else
+        id ${RUN_USER} >/dev/null 2>&1 || adduser -u ${USER_ID} -g ${GROUP_ID} ${RUN_USER} -D
+    fi
+fi
+set +e
+
+# 若存在apprt的环境变量，则通过apprt启动，不存在按旧的方式启动
+start_service
