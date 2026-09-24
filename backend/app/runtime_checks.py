@@ -171,11 +171,14 @@ def _check_storage():
     """确认上传、日志、OCR 模型和代码缓存目录可写。"""
     from flask import current_app
 
+    from app.config import DEFAULT_REPO_CACHE_DIR
+
     paths = (
         current_app.config.get("LOCAL_STORAGE_DIR", "/data/upload"),
         current_app.config.get("LOG_DIR", "/app/app/logs"),
         os.getenv("PADDLE_PDX_CACHE_HOME", "/data/paddle-cache"),
-        os.getenv("REPO_CACHE_DIR", "/tmp/fault-analyzer-repos"),
+        # 与故障分析、技能共用同一份 REPO_CACHE_DIR 配置，避免自检的目录和实际使用的目录不一致。
+        current_app.config.get("REPO_CACHE_DIR") or DEFAULT_REPO_CACHE_DIR,
     )
     for raw_path in paths:
         path = Path(raw_path)

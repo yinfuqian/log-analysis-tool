@@ -16,8 +16,8 @@ x-backend-environment: &backend-environment
   AUTH_USERS_FILE: /data/users.csv
   MYSQL_HOST: ${COMPOSE_MYSQL_HOST:-mysql}
   MYSQL_PORT: ${COMPOSE_MYSQL_PORT:-3306}
-  MYSQL_DATABASE: ${MYSQL_DATABASE:-log_analyzer}
-  MYSQL_USERNAME: ${MYSQL_USERNAME:-log_analyzer}
+  MYSQL_DATABASE: ${MYSQL_DATABASE:-jira_automation}
+  MYSQL_USERNAME: ${MYSQL_USERNAME:-jira_automation}
   MYSQL_PASSWORD: ${MYSQL_PASSWORD:-change-me}
   REDIS_HOST: ${COMPOSE_REDIS_HOST:-redis}
   REDIS_PORT: ${COMPOSE_REDIS_PORT:-6379}
@@ -28,7 +28,7 @@ x-backend-environment: &backend-environment
   LOCAL_OCR_ENABLED: ${LOCAL_OCR_ENABLED:-false}
   OCR_MIN_CONFIDENCE: ${OCR_MIN_CONFIDENCE:-0.45}
   PADDLE_PDX_CACHE_HOME: /data/paddle-cache
-  REPO_CACHE_DIR: /tmp/fault-analyzer-repos
+  REPO_CACHE_DIR: /tmp/jira-automation-repos
   # 技能执行（Codex Agent）相关配置。CODEX_BASE_URL/CODEX_API_KEY 为空时回退到 OPENAI_URL/OPENAI_KEY。
   # 技能目录与 CODEX_HOME 分离：技能由宿主机 ./skills 只读挂载，CODEX_HOME 用独立卷存放运行期状态。
   SKILLS_DIR: ${SKILLS_DIR:-/data/skills}
@@ -79,7 +79,7 @@ x-backend-volumes: &backend-volumes
   - codex-home:/data/codex
   - skill-workspace:/data/skill-workspace
   - runtime-logs:/app/app/logs
-  - repo-cache:/tmp/fault-analyzer-repos
+  - repo-cache:/tmp/jira-automation-repos
   - ocr-models:/data/paddle-cache
 
 services:
@@ -88,8 +88,8 @@ services:
     image: ${MYSQL_IMAGE:-docker.m.daocloud.io/library/mysql:8.4}
     environment:
       MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-root-change-me}
-      MYSQL_DATABASE: ${MYSQL_DATABASE:-log_analyzer}
-      MYSQL_USER: ${MYSQL_USERNAME:-log_analyzer}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-jira_automation}
+      MYSQL_USER: ${MYSQL_USERNAME:-jira_automation}
       MYSQL_PASSWORD: ${MYSQL_PASSWORD:-change-me}
     command:
       - --character-set-server=utf8mb4
@@ -125,7 +125,7 @@ services:
     restart: unless-stopped
 
   migrate:
-    image: ${BACKEND_IMAGE:-fault-analysis-backend:latest}
+    image: ${BACKEND_IMAGE:-jira-automation-backend:latest}
     build: *backend-build
     env_file:
       - .env
@@ -142,7 +142,7 @@ services:
     restart: "no"
 
   api:
-    image: ${BACKEND_IMAGE:-fault-analysis-backend:latest}
+    image: ${BACKEND_IMAGE:-jira-automation-backend:latest}
     build: *backend-build
     env_file:
       - .env
@@ -175,7 +175,7 @@ services:
     restart: unless-stopped
 
   worker:
-    image: ${BACKEND_IMAGE:-fault-analysis-backend:latest}
+    image: ${BACKEND_IMAGE:-jira-automation-backend:latest}
     build: *backend-build
     env_file:
       - .env
@@ -200,7 +200,7 @@ services:
     restart: unless-stopped
 
   frontend:
-    image: ${FRONTEND_IMAGE:-fault-analysis-frontend:latest}
+    image: ${FRONTEND_IMAGE:-jira-automation-frontend:latest}
     build:
       context: ./frontend
       dockerfile: Dockerfile

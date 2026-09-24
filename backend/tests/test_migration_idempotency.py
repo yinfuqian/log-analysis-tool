@@ -3,6 +3,9 @@ from pathlib import Path
 import unittest
 from unittest.mock import patch
 
+import sqlalchemy as sa
+from sqlalchemy.dialects import mysql
+
 import bootstrap_schema
 
 
@@ -18,13 +21,20 @@ def load_migration(filename):
 
 
 class FakeInspector:
-    def __init__(self, tables=(), indexes=None, unique_constraints=None):
+    def __init__(self, tables=(), indexes=None, unique_constraints=None, columns=None):
         self.tables = set(tables)
         self.indexes = indexes or {}
         self.unique_constraints = unique_constraints or {}
+        self.columns = columns or {}
 
     def has_table(self, table_name):
         return table_name in self.tables
+
+    def get_columns(self, table_name):
+        return [
+            {"name": name, "type": column_type}
+            for name, column_type in self.columns.get(table_name, {}).items()
+        ]
 
     def get_indexes(self, table_name):
         return [{"name": name} for name in self.indexes.get(table_name, ())]
@@ -122,6 +132,77 @@ class MigrationIdempotencyTests(unittest.TestCase):
         ddl = "\n".join(bootstrap_schema.DDL_STATEMENTS).lower()
 
         self.assertIn("create table if not exists skill_run_records", ddl)
+
+    def test_skill_run_progress_migration_alters_text_column_to_longtext(self):
+        migration = load_migration("b7e4c2a9f310_skill_run_progress_longtext.py")
+        inspector = FakeInspector(
+            tables={"skill_run_records"},
+            columns={"skill_run_records": {"progress": sa.Text()}},
+        )
+
+        with patch.object(migration.op, "get_bind", return_value=object()), \
+                patch.object(migration.sa, "inspect", return_value=inspector), \
+                patch.object(migration.op, "alter_column") as alter_column, \
+                patch.object(migration.op, "add_column") as add_column:
+            migration.upgrade()
+
+        alter_column.assert_called_once()
+        self.assertEqual(alter_column.call_args.args[0], "skill_run_records")
+        self.assertEqual(alter_column.call_args.args[1], "progress")
+        self.assertEqual(add_column.call_args_list, [])
+
+    def test_skill_run_progress_migration_skips_when_already_longtext(self):
+        migration = load_migration("b7e4c2a9f310_skill_run_progress_longtext.py")
+        inspector = FakeInspector(
+            tables={"skill_run_records"},
+            columns={"skill_run_records": {"progress": mysql.LONGTEXT()}},
+        )
+
+        with patch.object(migration.op, "get_bind", return_value=object()), \
+                patch.object(migration.sa, "inspect", return_value=inspector), \
+                patch.object(migration.op, "alter_column") as alter_column, \
+                patch.object(migration.op, "add_column") as add_column:
+            migration.upgrade()
+
+        alter_column.assert_not_called()
+        add_column.assert_not_called()
+
+    def test_skill_run_progress_migration_adds_missing_column(self):
+        migration = load_migration("b7e4c2a9f310_skill_run_progress_longtext.py")
+        inspector = FakeInspector(tables={"skill_run_records"}, columns={"skill_run_records": {}})
+
+        with patch.object(migration.op, "get_bind", return_value=object()), \
+                patch.object(migration.sa, "inspect", return_value=inspector), \
+                patch.object(migration.op, "alter_column") as alter_column, \
+                patch.object(migration.op, "add_column") as add_column:
+            migration.upgrade()
+
+        alter_column.assert_not_called()
+        add_column.assert_called_once()
+        self.assertEqual(add_column.call_args.args[1].name, "progress")
+
+    def test_skill_run_progress_migration_skips_when_table_is_missing(self):
+        migration = load_migration("b7e4c2a9f310_skill_run_progress_longtext.py")
+        inspector = FakeInspector(tables=set())
+
+        with patch.object(migration.op, "get_bind", return_value=object()), \
+                patch.object(migration.sa, "inspect", return_value=inspector), \
+                patch.object(migration.op, "alter_column") as alter_column:
+            migration.upgrade()
+
+        alter_column.assert_not_called()
+
+    def test_bootstrap_schema_declares_longtext_progress_for_skill_run_records(self):
+        ddl = " ".join(bootstrap_schema.DDL_STATEMENTS).lower()
+
+        self.assertIn("create table if not exists skill_run_records", ddl)
+        self.assertIn("progress longtext", ddl)
+
+    def test_skill_run_records_ddl_is_shared_with_auto_create_helper(self):
+        self.assertIn(
+            "create table if not exists skill_run_records",
+            bootstrap_schema.SKILL_RUN_RECORDS_DDL.lower(),
+        )
 
 
 if __name__ == "__main__":

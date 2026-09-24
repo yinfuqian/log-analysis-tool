@@ -66,7 +66,7 @@ def _build_mysql_uri():
     password = os.getenv("MYSQL_PASSWORD", "")
     host = os.getenv("MYSQL_HOST", "localhost")
     port = os.getenv("MYSQL_PORT", "3306")
-    database = os.getenv("MYSQL_DATABASE", "log_analyzer")
+    database = os.getenv("MYSQL_DATABASE", "jira_automation")
     return (
         f"mysql+pymysql://{quote_plus(username)}:{quote_plus(password)}"
         f"@{host}:{port}/{database}?charset=utf8mb4&ssl_disabled=true"
@@ -105,6 +105,9 @@ def _resolve_auth_users_file():
 # 部署时除密钥 CODEX_API_KEY、JIRA_TOKEN 必须自行填写外，其余配置可直接沿用这些默认值。
 # 技能目录与 CODEX_HOME 分离：技能由宿主机 skills/ 只读挂载，CODEX_HOME 只存放 Codex 运行期状态。
 DEFAULT_SKILLS_DIR = "/data/skills"
+# 代码检出缓存根目录：容器内由 compose 把它映射到 repo-cache 卷，本地可指向任意可写目录。
+# 技能与故障分析都通过 REPO_CACHE_DIR 读取它，不再各自硬编码路径。
+DEFAULT_REPO_CACHE_DIR = "/tmp/jira-automation-repos"
 DEFAULT_SKILL_WORKSPACE_DIR = "/data/skill-workspace"
 DEFAULT_SKILL_API_TOKEN = "local-dev-token"
 DEFAULT_SKILL_URL_ALLOWED_HOSTS = "jira.in.wezhuiyi.com"
@@ -170,6 +173,9 @@ class Config:
     if not os.path.exists(LOCAL_STORAGE_DIR):
         os.makedirs(LOCAL_STORAGE_DIR, exist_ok=True)
 
+    # 代码检出缓存根目录：故障分析克隆仓库、技能清理检出目录都读这一项，避免各处硬编码路径。
+    REPO_CACHE_DIR = _env_or("REPO_CACHE_DIR", DEFAULT_REPO_CACHE_DIR)
+
     # MinIO 配置todo
     MINIO_ENDPOINT = os.getenv("MINIO_ENDPOINT", "")
     MINIO_ACCESS_KEY = os.getenv("MINIO_ACCESS_KEY", "")
@@ -191,7 +197,7 @@ class Config:
     # 数据库 & Redis 配置
     MYSQL_HOST = os.getenv("MYSQL_HOST", "localhost")
     MYSQL_PORT = os.getenv("MYSQL_PORT", "3306")
-    MYSQL_DATABASE = os.getenv("MYSQL_DATABASE", "log_analyzer")
+    MYSQL_DATABASE = os.getenv("MYSQL_DATABASE", "jira_automation")
     MYSQL_USERNAME = os.getenv("MYSQL_USERNAME", "root")
     MYSQL_PASSWORD = os.getenv("MYSQL_PASSWORD", "")
     SQLALCHEMY_DATABASE_URI = os.getenv("SQLALCHEMY_DATABASE_URI", _build_mysql_uri())

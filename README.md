@@ -1,4 +1,4 @@
-# 故障分析工具
+# jira-automation（故障分析工具）
 
 故障分析工具用于综合分析日志、错误截图、业务页面截图、代码仓库和上下游模块信息。系统会先提取结构化错误证据，再使用 `gpt-5.6-sol` 进行高强度深度推理，输出问题明细、可能原因、代码位置、修复建议和相关模块影响。
 
@@ -183,11 +183,11 @@ docker compose exec worker celery -A celery_worker.celery_app inspect ping
 构建期完整自检：
 
 ```powershell
-docker build --progress=plain -t fault-analysis-backend:test backend
-docker run --rm fault-analysis-backend:test python verify_runtime.py --build
-docker run --rm fault-analysis-backend:test python verify_runtime.py --ocr
-docker build --progress=plain -t fault-analysis-frontend:test frontend
-docker run --rm fault-analysis-frontend:test nginx -t
+docker build --progress=plain -t jira-automation-backend:test backend
+docker run --rm jira-automation-backend:test python verify_runtime.py --build
+docker run --rm jira-automation-backend:test python verify_runtime.py --ocr
+docker build --progress=plain -t jira-automation-frontend:test frontend
+docker run --rm jira-automation-frontend:test nginx -t
 ```
 
 ## 本地开发与生产镜像发布
@@ -291,7 +291,7 @@ docker compose --env-file .env.production -f docker-compose.prod.yml up -d front
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts\export_release_image.ps1 `
-  -Image registry.example.com/fault-analysis/backend:2026.07.18-2
+  -Image registry.example.com/jira-automation/backend:2026.07.18-2
 ```
 
 把生成的 `.tar` 和 `.sha256` 文件传到生产服务器，核验后执行 `docker load -i <镜像文件.tar>`，再运行对应的 `up -d` 命令即可。完整操作见 `deploy/README.md`。
@@ -471,9 +471,9 @@ Windows 上 Celery 必须使用 `--pool=solo`；`--no-reload` 用于避免 Flask
 ```dotenv
 # 技能目录：默认值是容器内的 /data/skills，Windows 本地必须指向仓库 skills 目录，
 # 否则 /skill/list 会返回空列表。
-SKILLS_DIR=E:\zhuiyi\log-analysis-tool\skills
-SKILL_WORKSPACE_DIR=E:\zhuiyi\log-analysis-tool\backend\local-data\skill-workspace
-CODEX_HOME=E:\zhuiyi\log-analysis-tool\backend\local-data\codex-home
+SKILLS_DIR=E:\zhuiyi\jira-automation\skills
+SKILL_WORKSPACE_DIR=E:\zhuiyi\jira-automation\backend\local-data\skill-workspace
+CODEX_HOME=E:\zhuiyi\jira-automation\backend\local-data\codex-home
 ```
 
 `ANALYSIS_API_BASE_URL`、`ANALYSIS_API_TOKEN` 等技能相关配置统一写在根 `.env`。

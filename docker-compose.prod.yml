@@ -25,7 +25,7 @@ x-backend-environment: &backend-environment
   LOG_DIR: /app/app/logs
   LOGGING_LEVEL: ${LOGGING_LEVEL:-INFO}
   PADDLE_PDX_CACHE_HOME: /data/paddle-cache
-  REPO_CACHE_DIR: /tmp/fault-analyzer-repos
+  REPO_CACHE_DIR: /tmp/jira-automation-repos
   AUTH_LOGIN_MAX_FAILURES: ${AUTH_LOGIN_MAX_FAILURES:-5}
   AUTH_LOGIN_WINDOW_SECONDS: ${AUTH_LOGIN_WINDOW_SECONDS:-300}
   ACCOUNT_REQUEST_PROVIDER: ${ACCOUNT_REQUEST_PROVIDER:-mock}
@@ -98,7 +98,7 @@ x-backend-volumes: &backend-volumes
   - codex-home:/data/codex
   - skill-workspace:/data/skill-workspace
   - runtime-logs:/app/app/logs
-  - repo-cache:/tmp/fault-analyzer-repos
+  - repo-cache:/tmp/jira-automation-repos
   - ocr-models:/data/paddle-cache
 
 services:

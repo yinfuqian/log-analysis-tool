@@ -58,7 +58,7 @@ services:
       - ./data/users.csv:/users.csv
       - ./data/upload:/data/upload
       - ./data/logs:/app/app/logs
-      - ./data/repos:/tmp/log-analyzer-repos
+      - ./data/repos:/tmp/jira-automation-repos
       # 技能目录只读挂载：Codex 运行时无法改动技能定义，也不会把内置技能写进业务技能目录。
       - ./skills:/data/skills:ro
       # CODEX_HOME 独立挂载：Codex 状态库（state/logs/goals 等）落在 data 目录，不污染仓库。
@@ -118,7 +118,7 @@ services:
     volumes:
       - ./data/upload:/data/upload
       - ./data/logs:/app/app/logs
-      - ./data/repos:/tmp/log-analyzer-repos
+      - ./data/repos:/tmp/jira-automation-repos
       # 技能目录只读挂载：Codex 运行时无法改动技能定义，也不会把内置技能写进业务技能目录。
       - ./skills:/data/skills:ro
       # CODEX_HOME 独立挂载：Codex 状态库（state/logs/goals 等）落在 data 目录，不污染仓库。
@@ -178,7 +178,7 @@ services:
     volumes:
       - ./data/upload:/data/upload
       - ./data/logs:/app/app/logs
-      - ./data/repos:/tmp/log-analyzer-repos
+      - ./data/repos:/tmp/jira-automation-repos
       # 技能目录只读挂载：Codex 运行时无法改动技能定义，也不会把内置技能写进业务技能目录。
       - ./skills:/data/skills:ro
       # CODEX_HOME 独立挂载：Codex 状态库（state/logs/goals 等）落在 data 目录，不污染仓库。

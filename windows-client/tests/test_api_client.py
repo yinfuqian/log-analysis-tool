@@ -757,7 +757,7 @@ class ApiClientTests(unittest.TestCase):
         module = load_client_module()
         payload = {
             "task_id": "task-123",
-            "repo_path": "/tmp/log-analyzer-repos/task-123/repo-master",
+            "repo_path": "/tmp/jira-automation-repos/task-123/repo-master",
             "knowledge_hit": True,
             "knowledge_hit_count": 2,
             "issue_conclusion": {
@@ -983,7 +983,7 @@ class ApiClientTests(unittest.TestCase):
         module = load_client_module()
         payload = {
             "task_id": "task-123",
-            "repo_path": "/tmp/log-analyzer-repos/task-123/repo-master",
+            "repo_path": "/tmp/jira-automation-repos/task-123/repo-master",
             "log_analysis": "Broken pipe usually means the client closed the connection.",
             "code_analysis": "Check streaming response handling and client timeout settings.",
             "analysis_evidence": {

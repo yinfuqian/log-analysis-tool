@@ -23,8 +23,8 @@ if ($registryPrefix) {
     $registryPrefix = "$registryPrefix/"
 }
 
-$backendImage = "${registryPrefix}fault-analysis/backend:$Version"
-$frontendImage = "${registryPrefix}fault-analysis/frontend:$Version"
+$backendImage = "${registryPrefix}jira-automation/backend:$Version"
+$frontendImage = "${registryPrefix}jira-automation/frontend:$Version"
 
 function Invoke-DockerCommand {
     param(

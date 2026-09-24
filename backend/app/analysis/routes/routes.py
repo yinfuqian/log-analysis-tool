@@ -12,6 +12,7 @@ from openai import OpenAI
 from celery.result import AsyncResult
 from extensions import celery
 from app.ai_options import build_ai_request_options
+from app.config import DEFAULT_REPO_CACHE_DIR
 from app.analysis.routes.tasks import analyze_log_task
 from app.analysis.routes.language_adapters import detect_log_languages, extract_source_locations
 from app.logfile.models.model import AnalysisKnowledgeCase, Log, QueryRecord
@@ -260,6 +261,14 @@ def get_branch_info():
     })
 
 
+def _repo_cache_dir():
+    """返回代码检出缓存根目录：以 REPO_CACHE_DIR 配置为准，脱离应用上下文时用内置默认值。"""
+    try:
+        return app.config.get("REPO_CACHE_DIR") or DEFAULT_REPO_CACHE_DIR
+    except RuntimeError:
+        return DEFAULT_REPO_CACHE_DIR
+
+
 def clone_git_repo(address, tag_version, workspace_id=None):
     """\u514b\u9686\u6307\u5b9a Git \u4ed3\u5e93\u5230\u672c\u5730\u5de5\u4f5c\u76ee\u5f55\u3002"""
     GIT_USER = app.config.get("GIT_USER")
@@ -268,7 +277,7 @@ def clone_git_repo(address, tag_version, workspace_id=None):
     repo_name = address.split("/")[-1].replace(".git", "")
     safe_tag = re.sub(r"[^A-Za-z0-9_.-]+", "_", tag_version or "default")
     safe_workspace = re.sub(r"[^A-Za-z0-9_.-]+", "_", workspace_id or "shared")
-    repo_dir = os.path.join("/tmp/log-analyzer-repos", safe_workspace, f"{repo_name}-{safe_tag}")
+    repo_dir = os.path.join(_repo_cache_dir(), safe_workspace, f"{repo_name}-{safe_tag}")
 
     if os.path.exists(repo_dir):
         logging.info("Git \u4ed3\u5e93\u5df2\u5b58\u5728\uff0c\u590d\u7528\u672c\u5730\u76ee\u5f55\uff1arepo_dir=%s", repo_dir)
@@ -2563,8 +2572,10 @@ def build_chain_relevance_context(data, ocr_extractor=None, image_fallback_extra
     return source_text, ocr_result
 
 
-def cleanup_discovery_workspace(repo_path, workspace_id, repo_base_dir="/tmp/log-analyzer-repos"):
+def cleanup_discovery_workspace(repo_path, workspace_id, repo_base_dir=None):
     """清理 cleanup_discovery_workspace 对应的业务数据，保持现有调用约定。"""
+    # 未显式传入时按 REPO_CACHE_DIR 配置解析，避免调用方与配置里写的目录不一致。
+    repo_base_dir = repo_base_dir or _repo_cache_dir()
     if not repo_path or not workspace_id:
         return False
     real_base = os.path.realpath(repo_base_dir)

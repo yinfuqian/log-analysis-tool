@@ -8,6 +8,37 @@ from sqlalchemy.engine.url import make_url
 from app.config import Config
 
 
+# skill_run_records 的建表语句单独抽出：既参与下面的全量 DDL，也用于缺表时的自动补建。
+SKILL_RUN_RECORDS_DDL = """
+CREATE TABLE IF NOT EXISTS skill_run_records (
+    id INTEGER NOT NULL AUTO_INCREMENT,
+    task_id VARCHAR(64) NOT NULL,
+    skill_id VARCHAR(64) NOT NULL,
+    jira_url VARCHAR(500),
+    inputs TEXT,
+    status VARCHAR(32) NOT NULL,
+    stage VARCHAR(64),
+    progress LONGTEXT,
+    result_text TEXT,
+    error_message TEXT,
+    codex_session_id VARCHAR(128),
+    workspace_dir VARCHAR(500),
+    requested_by VARCHAR(255),
+    exit_code INTEGER,
+    duration_ms INTEGER,
+    created_at DATETIME NOT NULL,
+    started_at DATETIME,
+    finished_at DATETIME,
+    PRIMARY KEY (id),
+    UNIQUE KEY ix_skill_run_records_task_id (task_id),
+    KEY ix_skill_run_records_skill_id (skill_id),
+    KEY ix_skill_run_records_status (status),
+    KEY ix_skill_run_records_requested_by (requested_by),
+    KEY ix_skill_run_records_created_at (created_at)
+)
+"""
+
+
 DDL_STATEMENTS = [
     """
     CREATE TABLE IF NOT EXISTS branches (
@@ -129,34 +160,7 @@ DDL_STATEMENTS = [
         FOREIGN KEY(log_id) REFERENCES logs (id)
     )
     """,
-    """
-    CREATE TABLE IF NOT EXISTS skill_run_records (
-        id INTEGER NOT NULL AUTO_INCREMENT,
-        task_id VARCHAR(64) NOT NULL,
-        skill_id VARCHAR(64) NOT NULL,
-        jira_url VARCHAR(500),
-        inputs TEXT,
-        status VARCHAR(32) NOT NULL,
-        stage VARCHAR(64),
-        progress TEXT,
-        result_text TEXT,
-        error_message TEXT,
-        codex_session_id VARCHAR(128),
-        workspace_dir VARCHAR(500),
-        requested_by VARCHAR(255),
-        exit_code INTEGER,
-        duration_ms INTEGER,
-        created_at DATETIME NOT NULL,
-        started_at DATETIME,
-        finished_at DATETIME,
-        PRIMARY KEY (id),
-        UNIQUE KEY ix_skill_run_records_task_id (task_id),
-        KEY ix_skill_run_records_skill_id (skill_id),
-        KEY ix_skill_run_records_status (status),
-        KEY ix_skill_run_records_requested_by (requested_by),
-        KEY ix_skill_run_records_created_at (created_at)
-    )
-    """,
+    SKILL_RUN_RECORDS_DDL,
     """
     CREATE TABLE IF NOT EXISTS analysis_knowledge_cases (
         id INTEGER NOT NULL AUTO_INCREMENT,
@@ -379,6 +383,33 @@ def ensure_query_records_schema(cursor):
     )
 
 
+def column_data_type(cursor, table_name, column_name):
+    """返回列在 information_schema 里登记的数据类型（小写），列不存在时返回空串。"""
+    cursor.execute(
+        """
+        SELECT DATA_TYPE
+        FROM information_schema.columns
+        WHERE table_schema = DATABASE() AND table_name = %s AND column_name = %s
+        """,
+        (table_name, column_name),
+    )
+    row = cursor.fetchone()
+    return (row[0] or "").lower() if row else ""
+
+
+def ensure_skill_run_records_schema(cursor):
+    """保证技能执行记录表可用：缺表时自动建档，老库把 progress 从 TEXT 升级为 LONGTEXT。"""
+    if not table_exists(cursor, "skill_run_records"):
+        cursor.execute(SKILL_RUN_RECORDS_DDL)
+
+    progress_type = column_data_type(cursor, "skill_run_records", "progress")
+    if not progress_type:
+        cursor.execute("ALTER TABLE skill_run_records ADD COLUMN progress LONGTEXT NULL")
+    elif progress_type != "longtext":
+        # 进度里带最近若干条 Codex 事件，TEXT 的 64KB 上限会被写满，统一升级成 LONGTEXT。
+        cursor.execute("ALTER TABLE skill_run_records MODIFY COLUMN progress LONGTEXT NULL")
+
+
 def bootstrap_schema():
     """处理 bootstrap_schema 对应的业务步骤，并向调用方返回所需结果。"""
     revision = current_revision()
@@ -388,6 +419,7 @@ def bootstrap_schema():
             for ddl in DDL_STATEMENTS:
                 cursor.execute(ddl)
             ensure_query_records_schema(cursor)
+            ensure_skill_run_records_schema(cursor)
             cursor.execute(
                 "CREATE TABLE IF NOT EXISTS alembic_version ("
                 "version_num VARCHAR(32) NOT NULL, "

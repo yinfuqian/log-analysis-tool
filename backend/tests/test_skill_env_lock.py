@@ -11,19 +11,16 @@ BACKEND_DIR = Path(__file__).resolve().parents[1]
 if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
+try:
+    from tests.skill_env_fixture import LOCKED_SKILL_ENV
+except ModuleNotFoundError:  # 兼容以 tests 目录为根直接运行
+    from skill_env_fixture import LOCKED_SKILL_ENV
+
 PROJECT_ROOT = BACKEND_DIR.parent
 SKILLS_DIR = PROJECT_ROOT / "skills"
 
-# 一套完整的技能运行配置，等价于 .env 里已把 7 项参数填好。
-LOCKED_CONFIG = {
-    "JIRA_BASE_URL": "https://jira.example.com",
-    "JIRA_TOKEN": "jira-token-from-env",
-    "DEVOPS_MCP_URL": "https://devops.example.com/mcp",
-    "DEVOPS_MCP_TOKEN": "devops-token-from-env",
-    "CODEX_MODEL": "codex/test-model",
-    "CODEX_MODEL_PROVIDER": "testprovider",
-    "CODEX_BASE_URL": "https://model.example.com/v1",
-}
+# 一套完整的技能运行配置，等价于 .env 里已把 7 项参数填好；与其它技能用例共用同一份测试值。
+LOCKED_CONFIG = dict(LOCKED_SKILL_ENV)
 
 
 def create_test_app(**overrides):

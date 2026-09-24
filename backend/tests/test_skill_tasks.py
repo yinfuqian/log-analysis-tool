@@ -10,6 +10,11 @@ BACKEND_DIR = Path(__file__).resolve().parents[1]
 if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
+try:
+    from tests.skill_env_fixture import with_locked_skill_env
+except ModuleNotFoundError:  # 兼容以 tests 目录为根直接运行
+    from skill_env_fixture import with_locked_skill_env
+
 PROJECT_ROOT = BACKEND_DIR.parent
 SKILLS_DIR = PROJECT_ROOT / "skills"
 
@@ -25,6 +30,8 @@ def create_test_app(**overrides):
         "SKILLS_DIR": str(SKILLS_DIR),
         "SKILL_WORKSPACE_DIR": tempfile.gettempdir(),
     }
+    # 技能运行参数取自测试夹具：缺配置时任务会被直接拒绝，用例不应依赖本机 .env。
+    config = with_locked_skill_env(config)
     config.update(overrides)
     return create_app(config_overrides=config)
 

@@ -17,7 +17,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     FLASK_APP=app.py \
     AUTH_USERS_FILE=/data/users.csv \
     PADDLE_PDX_CACHE_HOME=/data/paddle-cache \
-    REPO_CACHE_DIR=/tmp/fault-analyzer-repos \
+    REPO_CACHE_DIR=/tmp/jira-automation-repos \
     SKILLS_DIR=/data/skills \
     SKILL_WORKSPACE_DIR=/data/skill-workspace \
     CODEX_HOME=/data/codex
@@ -72,7 +72,7 @@ COPY . .
 # 使用示例用户表完成构建自检；该文件不会复制到最终运行镜像。
 RUN find /app -type f -name '*.sh' -exec sed -i 's/\r$//' {} + \
     && chmod +x /app/docker-entrypoint.sh /app/migrate_db.sh /app/start.sh /app/start_worker.sh \
-    && mkdir -p /data/upload /data/paddle-cache /app/app/logs /tmp/fault-analyzer-repos \
+    && mkdir -p /data/upload /data/paddle-cache /app/app/logs /tmp/jira-automation-repos \
     && python -m pip check \
     && python -m compileall -q app.py celery_worker.py extensions.py app bootstrap_schema.py init_database.py manage_users.py verify_runtime.py \
     && AUTH_USERS_FILE=/app/users.example.csv python verify_runtime.py --build \
@@ -116,7 +116,7 @@ RUN chmod +x /app/docker-entrypoint.sh /app/migrate_db.sh /app/start.sh /app/sta
     && command -v unzip >/dev/null \
     && (command -v 7z >/dev/null || command -v 7zz >/dev/null || command -v 7za >/dev/null \
         || echo "提示：镜像内没有 7-Zip 系命令，7z/rar 归档将由 bsdtar 处理") \
-    && mkdir -p /data/upload /data/skills /data/codex /data/skill-workspace /app/app/logs /tmp/fault-analyzer-repos
+    && mkdir -p /data/upload /data/skills /data/codex /data/skill-workspace /app/app/logs /tmp/jira-automation-repos
 
 EXPOSE 5000
 

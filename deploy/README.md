@@ -56,8 +56,8 @@ docker compose --env-file .env.production -f docker-compose.prod.yml up -d
 在可访问镜像的机器上使用仓库中的 `scripts/export_release_image.ps1` 分别导出发生变化的镜像，把 `.tar` 和 `.sha256` 文件传到生产服务器。核对摘要后导入：
 
 ```bash
-sha256sum -c fault-analysis-backend-2026.07.18-1.tar.sha256
-docker load -i fault-analysis-backend-2026.07.18-1.tar
+sha256sum -c jira-automation-backend-2026.07.18-1.tar.sha256
+docker load -i jira-automation-backend-2026.07.18-1.tar
 ```
 
 导入后无需 `--build`，直接执行对应组件的 `up -d` 命令。

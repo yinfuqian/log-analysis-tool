@@ -29,9 +29,9 @@
 
 ## Docker 镜像与运行状态
 
-- 后端镜像：`fault-analysis-backend:final`
+- 后端镜像：`jira-automation-backend:final`
 - 后端镜像 ID：`sha256:f24a094994f534b46a955f95d43ff08c900de024148eadf61b5e7b6c44303839`
-- 前端镜像：`fault-analysis-frontend:final`
+- 前端镜像：`jira-automation-frontend:final`
 - 前端镜像 ID：`sha256:247fd674c70338efda43d7c8a9944a548e0218206af439b3157807ecba3d4d13`
 - MySQL：健康
 - Redis：健康

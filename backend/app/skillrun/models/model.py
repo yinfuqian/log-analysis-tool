@@ -2,6 +2,8 @@
 import json
 from datetime import datetime
 
+from sqlalchemy.dialects.mysql import LONGTEXT
+
 from extensions import db
 
 
@@ -26,7 +28,8 @@ class SkillRunRecord(db.Model):
     inputs = db.Column(db.Text, nullable=True)
     status = db.Column(db.String(32), nullable=False, default=STATUS_QUEUED, index=True)
     stage = db.Column(db.String(64), nullable=True)
-    progress = db.Column(db.Text, nullable=True)
+    # 进度里保存最近若干条 Codex 事件，可能超过 TEXT 的 64KB 上限，MySQL 侧用 LONGTEXT 承载。
+    progress = db.Column(db.Text().with_variant(LONGTEXT(), "mysql"), nullable=True)
     result_text = db.Column(db.Text, nullable=True)
     error_message = db.Column(db.Text, nullable=True)
     codex_session_id = db.Column(db.String(128), nullable=True)

@@ -44,7 +44,7 @@ if (Test-Path -LiteralPath $stagedSkills) {
     }
 }
 
-$archivePath = Join-Path $outputPath "fault-analysis-production-deploy-$Version.zip"
+$archivePath = Join-Path $outputPath "jira-automation-production-deploy-$Version.zip"
 if (Test-Path -LiteralPath $archivePath) {
     Remove-Item -LiteralPath $archivePath -Force
 }

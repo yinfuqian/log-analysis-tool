@@ -17,7 +17,7 @@ from extensions import db
 
 
 git_bp = Blueprint("git", __name__)
-GIT_SYNC_LOCK_NAME = "log_analyzer:gitlab_sync"
+GIT_SYNC_LOCK_NAME = "jira_automation:gitlab_sync"
 _local_sync_lock = threading.Lock()
 _repo_ref_locks = {}
 _repo_ref_locks_guard = threading.Lock()

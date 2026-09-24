@@ -41,7 +41,7 @@ class AsyncConfigTests(unittest.TestCase):
         env = {
             "MYSQL_HOST": "180.184.70.137",
             "MYSQL_PORT": "3306",
-            "MYSQL_DATABASE": "log_analyzer",
+            "MYSQL_DATABASE": "jira_automation",
             "MYSQL_USERNAME": "easygo",
             "MYSQL_PASSWORD": "secret-password",
         }
@@ -51,7 +51,7 @@ class AsyncConfigTests(unittest.TestCase):
 
         self.assertEqual(parsed.hostname, "180.184.70.137")
         self.assertEqual(parsed.port, 3306)
-        self.assertEqual(parsed.path.lstrip("/"), "log_analyzer")
+        self.assertEqual(parsed.path.lstrip("/"), "jira_automation")
         self.assertEqual(parsed.username, "easygo")
         self.assertEqual(unquote(parsed.password), "secret-password")
 
@@ -192,7 +192,12 @@ class AsyncConfigTests(unittest.TestCase):
         finally:
             module.load_dotenv_file = original
 
-        self.assertEqual([(item[0], item[1]) for item in calls], [("backend", ".env"), ("log-analysis-tool", ".env")])
+        # 用真实目录名比较，改工程名（重命名仓库目录）后这条断言不需要跟着改。
+        project_root_name = CONFIG_PATH.resolve().parents[2].name
+        self.assertEqual(
+            [(item[0], item[1]) for item in calls],
+            [("backend", ".env"), (project_root_name, ".env")],
+        )
         self.assertFalse(calls[0][2])
         self.assertTrue(calls[1][2])
         # 两个文件都要保护真实进程环境变量，避免 .env 覆盖 docker compose 注入的值。

@@ -5,6 +5,7 @@ import os
 import shutil
 
 from extensions import celery
+from app.config import DEFAULT_REPO_CACHE_DIR
 
 
 def report_progress(task, stage, stage_label, stage_percent, percent, message=None):
@@ -386,9 +387,21 @@ def _default_upload_dir():
         return "/data/upload"
 
 
-def cleanup_analysis_files(data, repo_path=None, task_id=None, upload_dir=None, repo_base_dir="/tmp/log-analyzer-repos"):
+def _default_repo_base_dir():
+    """返回代码检出缓存根目录：以 REPO_CACHE_DIR 配置为准，脱离应用上下文时用内置默认值。"""
+    try:
+        from flask import current_app
+
+        return current_app.config.get("REPO_CACHE_DIR") or DEFAULT_REPO_CACHE_DIR
+    except RuntimeError:
+        return DEFAULT_REPO_CACHE_DIR
+
+
+def cleanup_analysis_files(data, repo_path=None, task_id=None, upload_dir=None, repo_base_dir=None):
     """清理 cleanup_analysis_files 对应的业务数据，保持现有调用约定。"""
     upload_dir = upload_dir or _default_upload_dir()
+    # 未显式传入时按 REPO_CACHE_DIR 配置解析，保证清理范围与克隆仓库的根目录一致。
+    repo_base_dir = repo_base_dir or _default_repo_base_dir()
     uploaded_files = []
     if isinstance(data, dict):
         uploaded_files = [path for path in (data.get("file_paths") or []) if path]
