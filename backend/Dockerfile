@@ -65,7 +65,7 @@ COPY requirements.txt requirements-ocr.txt requirements-skill.txt ./
 RUN python -m pip install --upgrade pip \
     && python -m pip install -i "${PIP_INDEX_URL}" -r requirements.txt \
     && python -m pip install -i "${PIP_INDEX_URL}" -r requirements-ocr.txt \
-    && python -m pip install -i "${PIP_INDEX_URL}" -r req.uirements-skill.txt
+    && python -m pip install -i "${PIP_INDEX_URL}" -r requirements-skill.txt
 
 COPY . .
 
