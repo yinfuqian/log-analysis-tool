@@ -11,28 +11,43 @@ import { randomBytes } from 'node:crypto';
 export const REQUIRED_ENV_VARS = ['JIRA_BASE_URL', 'JIRA_PAT'];
 
 /**
+ * 服务端锁定标记：为 "1" 时凭据只认后端注入的 JIRA_TOKEN 与 JIRA_BASE_URL，
+ * 不再接受 JIRA_PAT 这个第二来源（见 backend/app/skillrun/env_lock.py）。
+ */
+export function envLocked(env = process.env) {
+  return String(env.SKILLRUN_ENV_LOCKED || '').trim() === '1';
+}
+
+/**
  * 从环境变量读取 JIRA 凭据。
  * 缺失时抛出错误，错误信息包含缺失的变量名（但绝不包含任何变量值）。
  */
 export function loadCredentials(env = process.env) {
-  const missing = REQUIRED_ENV_VARS.filter((name) => {
+  // 锁定模式（容器内由后端注入）下令牌统一取 JIRA_TOKEN，避免出现第二个凭据来源。
+  const locked = envLocked(env);
+  const patVar = locked ? 'JIRA_TOKEN' : 'JIRA_PAT';
+  const requiredVars = locked ? ['JIRA_BASE_URL', 'JIRA_TOKEN'] : REQUIRED_ENV_VARS;
+  const missing = requiredVars.filter((name) => {
     const value = env[name];
     return value === undefined || value === null || String(value).trim() === '';
   });
 
   if (missing.length > 0) {
+    const patHint = locked
+      ? '  （运行环境已锁定：令牌只认服务端注入的 JIRA_TOKEN，不接受令牌文件与命令行参数）\n'
+      : '  export JIRA_PAT="<你的 Personal Access Token>"\n';
     throw new CredentialsError(
       `缺少必需的环境变量：${missing.join('、')}。\n` +
         '请先设置后重试，例如：\n' +
         '  export JIRA_BASE_URL="https://jira.example.com"\n' +
-        '  export JIRA_PAT="<你的 Personal Access Token>"\n' +
+        patHint +
         '出于安全考虑，PAT 只能通过环境变量提供，不接受命令行参数。',
       missing,
     );
   }
 
   const baseUrl = String(env.JIRA_BASE_URL).trim().replace(/\/+$/, '');
-  const pat = String(env.JIRA_PAT);
+  const pat = String(env[patVar]);
 
   if (!/^https?:\/\//i.test(baseUrl)) {
     throw new CredentialsError(

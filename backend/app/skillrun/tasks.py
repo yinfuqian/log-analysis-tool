@@ -10,7 +10,7 @@ from sqlalchemy import text
 
 from extensions import celery, db
 
-from . import codex_runner, mcp_config, store
+from . import codex_runner, env_lock, mcp_config, store
 from .models.model import SkillRunRecord
 from .registry import SkillError, resolve_skill
 
@@ -100,6 +100,23 @@ def run_skill_task(self, record_id: int):
         return {"record_id": record_id, "status": "missing"}
 
     config = current_app.config
+    # 技能运行参数必须以服务端配置为唯一来源：缺失时直接失败，不做任何回落。
+    missing_env = env_lock.missing_env_keys(config)
+    if missing_env:
+        env_lock.log_missing_env(missing_env)
+        message = env_lock.build_missing_env_message(missing_env)
+        store.mark_finished(
+            record,
+            SkillRunRecord.STATUS_FAILED,
+            stage="env_not_configured",
+            error_message=message,
+        )
+        return {
+            "task_id": record.task_id,
+            "skill_id": record.skill_id,
+            "status": "failed",
+            "error": message,
+        }
     skills_dir = config.get("SKILLS_DIR")
     try:
         skill = resolve_skill(skills_dir, record.skill_id)
@@ -161,6 +178,7 @@ def run_skill_task(self, record_id: int):
         api_key=api_key,
         api_key_env=api_key_env,
         codex_home=codex_home,
+        locked_env=env_lock.collect_locked_env(config),
     )
 
     # 未显式配置 CODEX_SKILL_TIMEOUT 时按技能自身 runtime.json 声明的超时执行（缺省 1800 秒）。

@@ -26,7 +26,7 @@
 
 创建：Jira → 右上角头像 → 个人访问令牌 → 创建令牌。请求头：`Authorization: Bearer <token>`。
 
-凭证解析优先级：入参 `token` / 命令行 `--token` → 环境变量 `JIRA_TOKEN` → 令牌文件。
+凭证解析优先级：容器内由后端注入 `SKILLRUN_ENV_LOCKED=1` 时**只认环境变量** `JIRA_TOKEN` / `JIRA_BASE_URL`，不接受入参、令牌文件与其它站点；桌面端未注入该标记时按「入参 `token` / 命令行 `--token` → 环境变量 `JIRA_TOKEN` → 令牌文件」解析。
 
 令牌文件的查找顺序（路径在 Windows 与 Linux 下都适用）：
 

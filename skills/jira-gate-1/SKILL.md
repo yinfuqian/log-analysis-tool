@@ -257,7 +257,7 @@ G1 评论只给门禁结论；需求质量的细读结论由同仓库的 `review
 
 **技能位置**：容器内固定为 `/data/skills/review-jira-songlizhi`（桌面端为 `<仓库>/skills/review-jira-songlizhi`）。先完整读它的 `SKILL.md`，严格按它的五步流水线执行；**它自身对 Jira 只读**（`bin/` 里没有任何写请求），写附件由本技能的 `jira-cli.mjs attach` 负责，不要改动它的脚本。
 
-**环境桥接**（它读 `JIRA_PAT`，容器里注入的是 `JIRA_TOKEN`，每条命令都要带上）：
+**环境桥接**（桌面端它读 `JIRA_PAT`；容器内后端已注入 `SKILLRUN_ENV_LOCKED=1`，它直接读 `JIRA_TOKEN`，下面几条命令带上也无副作用）：
 
 ```bash
 export SKILL_DIR=/data/skills/review-jira-songlizhi
@@ -443,7 +443,7 @@ h4. 检查项
 
 ## 令牌配置
 
-凭证与地址解析顺序：入参 → 环境变量（`JIRA_TOKEN`、`JIRA_BASE_URL`）→ 令牌文件。令牌文件按序查找 skill 目录下的 `.jira-token` / `.jira-token.txt` / `jira-token.txt`、`~/.codex/jira-token.txt`、`~/.codex/jira/config.json`（支持 `{"token":"...","baseUrl":"..."}`）。
+凭证与地址解析顺序：容器内由后端注入 `SKILLRUN_ENV_LOCKED=1` 时**只认环境变量**（`JIRA_TOKEN`、`JIRA_BASE_URL`），不接受 `--token` / `--base-url` 与令牌文件，访问其它站点会直接报错；桌面端未注入该标记时按 入参 → 环境变量 → 令牌文件 解析。令牌文件按序查找 skill 目录下的 `.jira-token` / `.jira-token.txt` / `jira-token.txt`、`~/.codex/jira-token.txt`、`~/.codex/jira/config.json`（支持 `{"token":"...","baseUrl":"..."}`）。
 
 `selftest()` 返回的 `baseUrl` 与 `baseUrlSource` 会标明本次实际访问的站点及来源；**若 `baseUrlSource` 是「内置默认值（生产 Jira）」而当前并非生产环境，先停下来修配置，不要继续写评论。**
 

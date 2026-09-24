@@ -4,8 +4,12 @@ from pathlib import Path
 from urllib.parse import quote_plus
 
 
-def load_dotenv_file(path, override=False):
-    """读取并返回 load_dotenv_file 对应的业务数据，保持现有调用约定。"""
+def load_dotenv_file(path, override=False, protected_keys=None):
+    """读取 .env 文件并写入进程环境变量。
+
+    override=True 时同名变量以文件值为准，但 protected_keys 中的键保留原值：
+    它们来自真实进程环境（shell 导出或 docker compose 注入），优先级高于任何 .env 文件。
+    """
     env_path = Path(path)
     if not env_path.exists():
         return
@@ -23,19 +27,34 @@ def load_dotenv_file(path, override=False):
             continue
         if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
             value = value[1:-1]
+        if not value:
+            # 空值表示「未配置」：写进 os.environ 会挤掉后加载文件里的有效值
+            # （典型场景是根 .env 的 JIRA_TOKEN= 覆盖掉 backend/.env 里的真实令牌）。
+            continue
         parsed_values[key] = value
 
+    protected = {str(key) for key in (protected_keys or ())}
     for key, value in parsed_values.items():
+        if key in protected:
+            continue
         if override or key not in os.environ:
             os.environ[key] = value
 
 
 def load_local_env():
-    """读取并返回 load_local_env 对应的业务数据，保持现有调用约定。"""
+    """加载本地配置：仓库根 .env 是唯一权威来源，backend/.env 只做本地开发兜底。
+
+    顺序固定为「先 backend/.env，再根 .env 覆盖」：根 .env 里配置的任何值都不会被
+    backend/.env 改写，避免出现「配置写着测试站、实际连到生产站」这类静默错配。
+    backend/.env 只用于放根 .env 没有的本地开发路径（SKILLS_DIR、SKILL_WORKSPACE_DIR、
+    CODEX_HOME 等），其余键应统一写在根 .env。
+    """
     backend_dir = Path(__file__).resolve().parents[1]
     project_root = backend_dir.parent
-    for env_file in (project_root / ".env", backend_dir / ".env"):
-        load_dotenv_file(env_file, override=False)
+    # 进程环境（docker compose、shell export）优先级最高，任何 .env 都不得覆盖。
+    protected = set(os.environ)
+    load_dotenv_file(backend_dir / ".env", override=False, protected_keys=protected)
+    load_dotenv_file(project_root / ".env", override=True, protected_keys=protected)
 
 
 load_local_env()
@@ -228,6 +247,11 @@ class Config:
     SKILL_API_TOKEN_PATHS = _env_or("SKILL_API_TOKEN_PATHS", "/skill")
     SKILL_API_USERNAME = _env_or("SKILL_API_USERNAME", "external-api")
     SKILL_URL_ALLOWED_HOSTS = _env_or("SKILL_URL_ALLOWED_HOSTS", DEFAULT_SKILL_URL_ALLOWED_HOSTS)
+    # 技能访问 Jira 用到的地址与令牌：作为唯一权威来源注入技能子进程（见 skillrun/env_lock.py），
+    # 技能脚本不得改用令牌文件或命令行入参。令牌留空时任务直接失败，避免静默回落到令牌文件。
+    # Jira 站点地址不给内置默认值（猜错站点会把评论写到别的环境），必须由 .env 显式提供。
+    JIRA_BASE_URL = os.getenv("JIRA_BASE_URL", "")
+    JIRA_TOKEN = os.getenv("JIRA_TOKEN", "")
     CODEX_BIN = _env_or("CODEX_BIN", "codex")
     CODEX_HOME = _env_or("CODEX_HOME", DEFAULT_CODEX_HOME)
     CODEX_MODEL = _env_or("CODEX_MODEL", DEFAULT_CODEX_MODEL)

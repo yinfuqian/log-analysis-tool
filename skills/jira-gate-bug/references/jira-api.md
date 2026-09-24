@@ -10,7 +10,8 @@
 
 ## 2. 认证
 
-令牌来源（按优先级）：`--token` → `JIRA_TOKEN` 环境变量（部署时由 `.env` 注入 worker）→ 令牌文件：
+令牌来源（按优先级）：`--token` → `JIRA_TOKEN` 环境变量（部署时由 `.env` 注入 worker）→ 令牌文件。
+容器内后端会注入 `SKILLRUN_ENV_LOCKED=1`，此时只认 `JIRA_TOKEN` / `JIRA_BASE_URL` 两个环境变量，不再读取下面的令牌文件：
 
 1. `<技能目录>/.jira-token`、`.jira-token.txt`、`jira-token.txt`
 2. `<技能目录>/../jira-token.txt`

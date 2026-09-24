@@ -9,7 +9,7 @@ from flask import Blueprint, current_app, g, jsonify, request
 
 from extensions import celery
 
-from .. import store
+from .. import env_lock, store
 from ..models.model import SkillRunRecord
 from ..registry import SkillError, list_skills, resolve_skill
 from ..tasks import run_skill_task
@@ -86,6 +86,20 @@ def submit_skill_run():
     payload = request.get_json(silent=True) or {}
     if not isinstance(payload, dict):
         return _error_response(SkillRequestError("请求体必须是 JSON 对象"))
+
+    # 服务端配置是技能运行参数的唯一来源：缺配置时直接拒绝，避免技能回落到令牌文件或默认站点。
+    missing_env = env_lock.missing_env_keys(current_app.config)
+    if missing_env:
+        env_lock.log_missing_env(missing_env)
+        return (
+            jsonify(
+                {
+                    "error": env_lock.build_missing_env_message(missing_env),
+                    "missing_env": missing_env,
+                }
+            ),
+            503,
+        )
 
     skill_id = str(payload.get("skill_id") or "").strip()
     if not skill_id:

@@ -368,7 +368,7 @@ async function main() {
         (failures.length > 0 ? `，${failures.length} 条无法访问` : ''),
     );
   } catch (error) {
-    const secrets = [process.env.JIRA_PAT].filter(Boolean);
+    const secrets = [process.env.JIRA_PAT, process.env.JIRA_TOKEN].filter(Boolean);
     const logger = createLogger({ secrets });
     if (error instanceof CredentialsError) {
       logger.error(error.message);

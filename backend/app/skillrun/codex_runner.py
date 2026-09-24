@@ -53,7 +53,12 @@ DEFAULT_PROMPT_TEMPLATE = """请使用 {skill_id} 技能完成本次任务。
 4. 运行环境已预装技能所需工具与依赖（含 bsdtar / 7z / unzip 等解压命令、Python 与 Node 依赖），
    不要执行 apt-get、yum、apk、pip、npm 等安装命令；确实缺少工具时可以自行联网安装。
 5. 技能要求的交付物（Jira 评论、状态流转、附件上传）都要真实完成；完成后用简洁中文总结：
-   是否达标、难度等级、实际写入的内容、上传的附件名、关键依据。"""
+   是否达标、难度等级、实际写入的内容、上传的附件名、关键依据。
+6. 运行参数已由服务端锁定：JIRA_BASE_URL、JIRA_TOKEN、DEVOPS_MCP_URL、DEVOPS_MCP_TOKEN、
+   CODEX_MODEL、CODEX_MODEL_PROVIDER、CODEX_BASE_URL 一律直接使用当前进程的环境变量，
+   不要读取技能目录或 ~/.codex 下的令牌文件，不要用 --base-url/--token 覆盖，
+   也不要导出新的同名变量，或在工作区创建 .codex/config.toml 覆盖模型与中转设置
+   （技能脚本检测到锁定标记后会直接拒绝这些来源）。"""
 
 
 @dataclass
@@ -219,13 +224,25 @@ def build_codex_command(
     return command
 
 
-def build_codex_env(base_env: dict, api_key: str = "", api_key_env: str = DEFAULT_API_KEY_ENV, codex_home: str = "") -> dict:
-    """基于当前进程环境构造 Codex 子进程环境变量。"""
+def build_codex_env(
+    base_env: dict,
+    api_key: str = "",
+    api_key_env: str = DEFAULT_API_KEY_ENV,
+    codex_home: str = "",
+    locked_env: dict = None,
+) -> dict:
+    """基于当前进程环境构造 Codex 子进程环境变量。
+
+    locked_env 是服务端配置解析出的权威运行参数（见 skillrun/env_lock.py）：最后写入，
+    用于覆盖父进程或宿主环境里可能存在的同名变量，并带上锁定标记让技能脚本拒绝其它来源。
+    """
     env = dict(base_env or os.environ)
     if codex_home:
         env["CODEX_HOME"] = codex_home
     if api_key:
         env[str(api_key_env or DEFAULT_API_KEY_ENV)] = api_key
+    if locked_env:
+        env.update({str(name): str(value) for name, value in locked_env.items()})
     return env
 
 

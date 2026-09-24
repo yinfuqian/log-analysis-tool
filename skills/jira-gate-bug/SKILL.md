@@ -236,7 +236,7 @@ h4. 需要补充
 
 ## 令牌与配置
 
-- Jira 令牌：`JIRA_TOKEN` 环境变量（部署时由 `.env` 注入），或 `--token`，或技能目录 / `~/.codex` 下的 `.jira-token`、`jira-token.txt`、`~/.codex/jira/config.json`。
+- Jira 令牌：`JIRA_TOKEN` 环境变量（部署时由 `.env` 注入）。容器内后端注入 `SKILLRUN_ENV_LOCKED=1` 后只认该环境变量与 `JIRA_BASE_URL`；桌面端未锁定时可回落到 `--token`，或技能目录 / `~/.codex` 下的 `.jira-token`、`jira-token.txt`、`~/.codex/jira/config.json`。
 - 故障分析服务：`ANALYSIS_API_BASE_URL`（容器内默认 `http://api:5000`，宿主网络为 `http://127.0.0.1:5000`）与 `ANALYSIS_API_TOKEN`（内部令牌，未配置时脚本会直接报错并说明如何配置）。
 - 可选 `jira-config.json`（放在技能目录或 `~/.codex/jira/config.json`）：
 

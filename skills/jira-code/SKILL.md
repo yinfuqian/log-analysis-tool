@@ -39,12 +39,12 @@ description: 读取 Jira 单上的「开发方案」附件，确定 GitLab 仓�
 
 | 环境变量 | 用途 | 缺失时的后果 |
 |---|---|---|
-| `JIRA_TOKEN` | Jira 个人访问令牌，`jira-cli.mjs` 读取 | 读不到单子，无法执行 |
-| `JIRA_BASE_URL` | Jira 站点地址 | 回落到内置默认值，可能连错站点 |
+| `JIRA_TOKEN` | Jira 个人访问令牌，`jira-cli.mjs` 读取（服务端注入后锁定，不读令牌文件） | 服务端缺该配置时任务直接失败，不会回落到令牌文件 |
+| `JIRA_BASE_URL` | Jira 站点地址；技能只允许访问该站点，传入其它站点的链接会被拒绝 | 服务端缺该配置时任务直接失败 |
 | `GITLAB_PRIVATE_TOKEN` | GitLab 访问令牌（推送必需，需要写仓库权限） | 只能拉取，推送会失败 |
 | `GIT_USER` / `GIT_PASSWORD` | 上没有令牌时的账号密码兜底 | — |
 | `GIT_BASE_URL` | GitLab 站点地址，方案里只写「group/repo」时用来补主机 | 需要显式传 `--base-url` |
-| `DEVOPS_MCP_TOKEN` | 流水线平台 API Token（热更新必需），由后端写进 `CODEX_HOME/config.toml` 的 MCP 配置 | 没有 MCP 工具可用，热更新阶段只能跳过 |
+| `DEVOPS_MCP_TOKEN` | 流水线平台 API Token（热更新必需），由后端按 `.env` 写进 `CODEX_HOME/config.toml` 的 MCP 配置（同名旧配置会被覆盖） | 没有 MCP 工具可用，热更新阶段只能跳过 |
 | `DEVOPS_MCP_URL` | 流水线 MCP server 地址 | 回落到内置默认地址 |
 
 先做一次自检，把凭据状态确认清楚再动手：

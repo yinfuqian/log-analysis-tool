@@ -367,7 +367,9 @@ curl -H "X-API-Token: <SKILL_API_TOKEN>" http://127.0.0.1:5000/skill/task/SKL-8F
 
 ### 技能配置
 
-除 `CODEX_API_KEY`、`JIRA_TOKEN` 两项密钥外，其余技能配置均已内置已验证可用的默认值，部署时无需在 `.env` 中重复填写。
+配置来源统一为**仓库根目录的 `.env`**（容器内由 `docker compose --env-file .env` 注入）。应用启动时先读 `backend/.env` 再读根 `.env`，因此根 `.env` 里配置过的键一律以根 `.env` 为准；`backend/.env` 只保留本地开发路径（`SKILLS_DIR`、`SKILL_WORKSPACE_DIR`、`CODEX_HOME`）。真实进程环境变量优先级最高，任何 `.env` 都不会覆盖它。
+
+除 `CODEX_API_KEY`、`JIRA_TOKEN`、`JIRA_BASE_URL` 三项必须自行填写外，其余技能配置均已内置已验证可用的默认值，部署时无需在 `.env` 中重复填写。
 
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
@@ -375,9 +377,9 @@ curl -H "X-API-Token: <SKILL_API_TOKEN>" http://127.0.0.1:5000/skill/task/SKL-8F
 | `SKILL_URL_ALLOWED_HOSTS` | `jira.in.wezhuiyi.com` | `jira_url` 主机白名单，逗号分隔；留空表示不限制 |
 | `SKILL_WORKSPACE_DIR` | `/data/skill-workspace` | 技能工作目录 |
 | `CODEX_SKILL_TIMEOUT` | 留空 | 单次技能执行超时秒数；留空表示按技能自身 `runtime.json` 声明（`jira-code` 7200、`jira-defect-gate` 3600、其余 1800），填写后统一覆盖 |
-| `CODEX_MODEL` | `codex/deepseek-flash` | Codex 使用的模型 |
+| `CODEX_MODEL` | `codex/deepseek-flash` | Codex 使用的模型，后端以 `-c model=...` 覆盖，技能执行以该值为准 |
 | `CODEX_MODEL_PROVIDER` | `skillrun` | 模型提供方标识，后端以 `-c model_provider=...` 传给 Codex |
-| `CODEX_BASE_URL` | `https://newapi.in.wezhuiyi.com/v1` | 模型中转地址；未配置时回退 `OPENAI_URL` |
+| `CODEX_BASE_URL` | `https://newapi.in.wezhuiyi.com/v1` | 模型中转地址，后端以 `-c model_providers.<provider>.base_url=...` 覆盖；未配置时回退 `OPENAI_URL` |
 | `CODEX_API_KEY` | 无（**必填**） | 模型中转令牌；未配置时回退 `OPENAI_KEY` |
 | `CODEX_WIRE_API`、`CODEX_REASONING_EFFORT` | `responses`、`high` | Codex 请求协议与推理强度 |
 | `CODEX_SANDBOX` | `danger-full-access` | Codex 子进程沙箱模式，隔离边界由容器提供 |
@@ -385,15 +387,21 @@ curl -H "X-API-Token: <SKILL_API_TOKEN>" http://127.0.0.1:5000/skill/task/SKL-8F
 | `SKILL_RECOVER_ORPHANS` | `true` | worker 启动时把上一次运行遗留的 `running` 任务标记为失败 |
 | `CODEX_HOME` | `/data/codex` | Codex 运行目录，挂载 `codex-home` 命名卷，只存放 Codex 运行期状态（`state_*.sqlite` 等） |
 | `SKILLS_DIR` | `/data/skills` | 技能目录，容器内由 `./skills` 只读挂载而来，Codex 运行时不会改写它 |
-| `JIRA_TOKEN` | 无（**必填**） | 注入给技能脚本的 Jira 个人访问令牌；也可把令牌文件放到 `skills/.jira-token` |
-| `JIRA_BASE_URL` | `https://jira.in.wezhuiyi.com` | 注入给技能脚本的 Jira 站点地址 |
+| `JIRA_TOKEN` | 无（**必填**） | 注入给技能脚本的 Jira 个人访问令牌；运行时锁定为唯一来源，技能不会回落到 `skills/.jira-token` 等令牌文件 |
+| `JIRA_BASE_URL` | 无（**必填**） | 注入给技能脚本的 Jira 站点地址；技能只允许访问该站点，传入其它站点的单号链接会被拒绝 |
 | `GITLAB_PRIVATE_TOKEN` | 无 | `jira-code` 拉分支与推送代码用的 GitLab 令牌，需要仓库写权限；缺失时技能只会中断并如实上报 |
 | `GIT_BASE_URL` | 无 | GitLab 站点地址；方案里只写 `group/repo` 时用它补全克隆地址 |
 | `GIT_USER`、`GIT_PASSWORD` | 无 | 没有 `GITLAB_PRIVATE_TOKEN` 时的账号密码兜底 |
-| `DEVOPS_MCP_TOKEN` | 无 | 流水线平台个人中心签发的 API Token；`jira-code` 的热更新阶段用它调 `pipeline-integration-mcp`，缺失时后端不注册 MCP，技能按「跳过并说明」处理 |
-| `DEVOPS_MCP_URL` | `https://devops.ks1.wezhuiyi.com/mcp` | 流水线 MCP server 地址，由后端写进 `CODEX_HOME/config.toml` |
+| `DEVOPS_MCP_TOKEN` | 无 | 流水线平台个人中心签发的 API Token；`jira-code` 的热更新阶段用它调 `pipeline-integration-mcp`，由后端写进 `CODEX_HOME/config.toml`（同名旧配置会被覆盖）；缺失时后端清掉该 server 配置，技能按「跳过并说明」处理 |
+| `DEVOPS_MCP_URL` | `https://devops.ks1.wezhuiyi.com/mcp` | 流水线 MCP server 地址，与 `DEVOPS_MCP_TOKEN` 一起由后端写进 `CODEX_HOME/config.toml` |
 | `ANALYSIS_API_BASE_URL` | `http://api:5000` | `jira-gate-bug` 回写时调用的本服务地址（宿主网络改为 `http://127.0.0.1:5000`） |
 | `ANALYSIS_API_TOKEN` | `local-dev-analysis-token` | 技能脚本调用 `/analysis`、`/logfile` 等接口的内部令牌；生产环境必须替换 |
+
+**技能运行参数来源锁定**：后端在启动技能前，用上面的配置值覆盖同名环境变量并注入 `SKILLRUN_ENV_LOCKED=1`；
+技能脚本（`jira.mjs`、`jira-cli.mjs` 等）读到该标记后只认环境变量，不再回落到令牌文件、`--token` / `--base-url` 入参与内置默认站点。
+必填项（`JIRA_BASE_URL`、`JIRA_TOKEN`、`DEVOPS_MCP_URL`、`CODEX_MODEL`、`CODEX_MODEL_PROVIDER`、`CODEX_BASE_URL`）缺失时，
+`POST /skill/run` 直接返回 503 并列出缺哪一项，worker 也会把任务标记为失败，不会带着来源不明的参数继续跑；
+`DEVOPS_MCP_TOKEN` 留空表示不启用热更新，此时后端会清掉 `CODEX_HOME/config.toml` 里的同名 MCP 配置。
 
 技能运行参数由后端以 `codex exec -c ...` 传入（模型、中转地址、请求协议、推理强度等），容器内无需维护 `config.toml`；
 需要附加 Codex 配置时用 `CODEX_EXTRA_ARGS` 追加，例如 `CODEX_EXTRA_ARGS=-c model_context_window=128000`。
@@ -426,21 +434,20 @@ docker compose exec worker sh -c 'grep -c pipeline-integration-mcp /data/codex/c
 
 本地直连 MySQL 与 Redis 即可跑通整条技能链路，表结构与生产使用同一套迁移。步骤：
 
-1. 安装后端依赖并复制配置模板：
+1. 安装后端依赖：
 
 ```powershell
 python -m venv backend\.venv-win
 backend\.venv-win\Scripts\python.exe -m pip install -r backend\requirements-windows.txt
-Copy-Item .env.example backend\.env
 ```
 
-2. 填写 `backend/.env`：
+2. 填写**仓库根目录的 `.env`**（唯一权威来源；`backend/.env` 只用于放本地开发路径，见步骤 5）：
 
 - 数据库与 Redis：`MYSQL_HOST`、`MYSQL_PORT`、`MYSQL_DATABASE`、`MYSQL_USERNAME`、`MYSQL_PASSWORD` 指向可用的 MySQL 实例；`REDIS_HOST`、`REDIS_PORT` 指向可用的 Redis。应用默认按这组参数拼装 `SQLALCHEMY_DATABASE_URI`，无需手写连接串。
 - 必填密钥：`JIRA_TOKEN`、`CODEX_API_KEY`。其余技能配置（含 `CODEX_MODEL`、`CODEX_BASE_URL`、`SKILL_API_TOKEN`、`JIRA_BASE_URL`）均已内置可用默认值。
 - 要跑 `jira-code` 才需要额外配置 `GITLAB_PRIVATE_TOKEN`（需仓库写权限）与 `GIT_BASE_URL`；不填也能启动服务，只是该技能会中断并说明缺少凭据。
 - `jira-code` 的热更新阶段需要 `DEVOPS_MCP_TOKEN`（流水线平台个人中心签发）；不填时热更新会跳过并在评论里说明，代码推送不受影响。`DEVOPS_MCP_URL` 有内置默认值，通常不用改。
-- 本地路径：把 `LOCAL_STORAGE_DIR`、`LOG_DIR` 改成本机可写目录，不要沿用容器内的 `/data/...` 路径。
+- 本地路径：把 `LOCAL_STORAGE_DIR`、`LOG_DIR` 改成本机可写目录，不要沿用容器内的 `/data/...` 路径；`SKILLS_DIR`、`SKILL_WORKSPACE_DIR`、`CODEX_HOME` 放在 `backend/.env`（根 `.env` 中不配置这三项，否则会被 docker compose 带进容器）。
 
 3. 建表（与生产同一套迁移）：
 
@@ -459,18 +466,19 @@ cd backend
 
 Windows 上 Celery 必须使用 `--pool=solo`；`--no-reload` 用于避免 Flask 重载子进程残留占用 `5000` 端口。
 
-5. 技能相关的本地配置（`backend/.env` 或仓库根 `.env`，根 `.env` 会被自动读取）：
+5. 本地专用的路径配置写在 `backend/.env`（根 `.env` 里已配置过的键一律以根 `.env` 为准，本文件只补根 `.env` 没有的项）：
 
 ```dotenv
 # 技能目录：默认值是容器内的 /data/skills，Windows 本地必须指向仓库 skills 目录，
 # 否则 /skill/list 会返回空列表。
 SKILLS_DIR=E:\zhuiyi\log-analysis-tool\skills
-# 技能脚本回写故障分析时访问的服务地址与内部令牌，两个令牌不要用同一个值。
-ANALYSIS_API_BASE_URL=http://127.0.0.1:5000
-ANALYSIS_API_TOKEN=local-dev-analysis-token
+SKILL_WORKSPACE_DIR=E:\zhuiyi\log-analysis-tool\backend\local-data\skill-workspace
+CODEX_HOME=E:\zhuiyi\log-analysis-tool\backend\local-data\codex-home
 ```
 
-6. 自检与调用（`SKILL_API_TOKEN` 即 `backend/.env` 中配置的令牌）：
+`ANALYSIS_API_BASE_URL`、`ANALYSIS_API_TOKEN` 等技能相关配置统一写在根 `.env`。
+
+6. 自检与调用（`SKILL_API_TOKEN` 即根 `.env` 中配置的令牌）：
 
 ```powershell
 node ..\skills\jira-gate-1\scripts\jira-cli.mjs selftest

@@ -99,6 +99,18 @@ function readTokenFile() {
 
 /** 组装 jira.mjs 需要的调用选项，命令行优先于环境变量与令牌文件 */
 function buildOptions(options) {
+  if (String(process.env.SKILLRUN_ENV_LOCKED || "").trim() === "1") {
+    // 锁定模式：地址与令牌只认服务端注入的环境变量，不回落令牌文件，也不接受命令行改地址。
+    const envToken = String(process.env.JIRA_TOKEN || "").trim();
+    const envBaseUrl = String(process.env.JIRA_BASE_URL || "").trim().replace(/\/+$/, "");
+    if (options.token && String(options.token).trim() !== envToken) {
+      throw new Error("运行环境已锁定：不允许用 --token 覆盖服务端注入的 JIRA_TOKEN。");
+    }
+    if (options["base-url"] && String(options["base-url"]).trim().replace(/\/+$/, "") !== envBaseUrl) {
+      throw new Error("运行环境已锁定：只允许访问 JIRA_BASE_URL 配置的站点 " + envBaseUrl + "。");
+    }
+    return {};
+  }
   const result = {};
   const fromFile = readTokenFile() || {};
   const token = options.token || process.env.JIRA_TOKEN || fromFile.token;

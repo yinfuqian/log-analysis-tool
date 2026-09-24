@@ -18,6 +18,51 @@ export const DEFAULT_BASE_URL = "https://jira.in.wezhuiyi.com";
 /** 允许的凭证文件候选位置（相对 skill 目录与 ~/.codex） */
 const TOKEN_FILE_NAMES = [".jira-token", ".jira-token.txt", "jira-token.txt"];
 
+/** 服务端锁定标记：为 "1" 时技能只认环境变量，禁止回落到令牌文件与命令行入参 */
+export const ENV_LOCK_FLAG = "SKILLRUN_ENV_LOCKED";
+
+/** 是否处于服务端锁定模式（容器内由后端注入 SKILLRUN_ENV_LOCKED=1） */
+export function envLocked() {
+  return readEnv(ENV_LOCK_FLAG) === "1";
+}
+
+/** 去掉末尾斜杠并转小写，用于判断两个地址是否同一个站点 */
+function normalizeUrlForCompare(value) {
+  return String(value || "").trim().replace(/\/+$/, "").toLowerCase();
+}
+
+/** 锁定模式下的权威地址：未注入时直接报错，绝不回落到内置默认站点 */
+function lockedBaseUrl() {
+  const value = readEnv("JIRA_BASE_URL");
+  if (!value) {
+    throw new Error("运行环境已锁定，但服务端未注入 JIRA_BASE_URL；请检查 .env 配置后重启 api/worker。");
+  }
+  return value.replace(/\/+$/, "");
+}
+
+/** 锁定模式下校验访问目标就是 JIRA_BASE_URL 配置的站点 */
+function assertLockedTarget(target) {
+  const expected = lockedBaseUrl();
+  let origin = "";
+  try {
+    origin = new URL(String(target)).origin;
+  } catch (e) {
+    throw new Error("运行环境已锁定，但目标地址不是合法 URL：" + target);
+  }
+  if (normalizeUrlForCompare(origin) !== normalizeUrlForCompare(expected)) {
+    throw new Error("运行环境已锁定：只允许访问 JIRA_BASE_URL 配置的站点 " + expected + "，已拒绝访问 " + origin + "。");
+  }
+}
+
+/** 锁定模式下校验调用方传入的 Jira 链接指向配置站点 */
+export function assertLockedIssueInput(input) {
+  if (!envLocked()) return;
+  const text = String(input || "").trim();
+  if (!/^https?:\/\//i.test(text)) return;
+  assertLockedTarget(text);
+}
+
+
 /** 安全读取环境变量：node_repl 沙箱里没有 process，缺失时返回空字符串 */
 function readEnv(name) {
   try {
@@ -80,6 +125,19 @@ export function skillDir() {
  *    3) JSON 配置：{"token":"...","baseUrl":"...","auth":"bearer|basic","username":"..."}
  */
 export async function resolveToken(explicit) {
+  if (envLocked()) {
+    // 锁定模式：令牌只认服务端注入的 JIRA_TOKEN，不读令牌文件、不认命令行入参。
+    const envToken = readEnv("JIRA_TOKEN");
+    const explicitToken = explicit ? String(explicit).trim() : "";
+    if (explicitToken && explicitToken !== envToken) {
+      throw new Error("运行环境已锁定：不允许用 --token 覆盖服务端注入的 JIRA_TOKEN。");
+    }
+    return {
+      token: envToken || null,
+      source: envToken ? "环境变量 JIRA_TOKEN（服务端锁定）" : null,
+      baseUrl: readEnv("JIRA_BASE_URL") || null,
+    };
+  }
   if (explicit) return { token: String(explicit).trim(), source: "argument" };
   const fs = await import("node:fs");
   const path = await import("node:path");
@@ -167,7 +225,17 @@ export function buildAuthHeader(cred) {
 /** 统一发起 REST 请求 */
 export async function request(method, apiPath, options = {}) {
   const cred = await resolveToken(options.token || null);
-  const baseUrl = (options.baseUrl || cred.baseUrl || readEnv("JIRA_BASE_URL") || DEFAULT_BASE_URL).replace(/\/+$/, "");
+  const locked = envLocked();
+  let baseUrl;
+  if (locked) {
+    // 锁定模式：只允许访问服务端配置的站点，传入其它地址直接拒绝。
+    baseUrl = lockedBaseUrl();
+    if (options.baseUrl && normalizeUrlForCompare(options.baseUrl) !== normalizeUrlForCompare(baseUrl)) {
+      throw new Error("运行环境已锁定：只允许访问 JIRA_BASE_URL 配置的站点 " + baseUrl + "。");
+    }
+  } else {
+    baseUrl = (options.baseUrl || cred.baseUrl || readEnv("JIRA_BASE_URL") || DEFAULT_BASE_URL).replace(/\/+$/, "");
+  }
   const headers = { Accept: "application/json", "X-Atlassian-Token": "no-check" };
   if (cred.token) headers.Authorization = buildAuthHeader(cred);
   let payload;
@@ -181,6 +249,7 @@ export async function request(method, apiPath, options = {}) {
       payload = typeof options.body === "string" ? options.body : JSON.stringify(options.body);
     }
   }
+  if (locked && /^https?:\/\//i.test(apiPath)) assertLockedTarget(apiPath);
   const target = /^https?:\/\//i.test(apiPath) ? apiPath : baseUrl + apiPath;
   const res = await fetch(target, { method, headers, body: payload, redirect: "follow" });
   if (options.raw) return res;
@@ -355,6 +424,7 @@ export function normalizeIssue(raw) {
 /** 通过 JQL 查询以该单为父的需求子任务（部分 Jira 项目的 subtasks 字段不可用时兜底） */
 export async function fetchSubtasksByParent(keyOrUrl, options = {}) {
   const key = parseIssueKey(keyOrUrl);
+  assertLockedIssueInput(keyOrUrl);
   if (!key) return [];
   try {
     const jql = encodeURIComponent(`parent = ${key}`);
@@ -374,6 +444,7 @@ export async function fetchSubtasksByParent(keyOrUrl, options = {}) {
 /** 获取并规范化单个需求单 */
 export async function getIssue(keyOrUrl, options = {}) {
   const key = parseIssueKey(keyOrUrl);
+  assertLockedIssueInput(keyOrUrl);
   if (!key) throw new Error(`无法从输入中解析 Jira 问题 Key：${keyOrUrl}`);
   const data = await request("GET", `/rest/api/2/issue/${encodeURIComponent(key)}?expand=names,renderedFields,schema`, options);
   const issue = normalizeIssue(data);
@@ -501,6 +572,7 @@ export async function downloadAttachments(keyOrUrl, outDir, options = {}) {
 /** 写入评论 */
 export async function addComment(keyOrUrl, body, options = {}) {
   const key = parseIssueKey(keyOrUrl);
+  assertLockedIssueInput(keyOrUrl);
   if (!key) throw new Error(`无法解析 Jira 问题 Key：${keyOrUrl}`);
   if (!body || !String(body).trim()) throw new Error("评论内容为空，已阻止写入");
   return await request("POST", `/rest/api/2/issue/${encodeURIComponent(key)}/comment`, { ...options, body: { body: String(body) } });
@@ -509,6 +581,7 @@ export async function addComment(keyOrUrl, body, options = {}) {
 /** 更新既有评论 */
 export async function updateComment(keyOrUrl, commentId, body, options = {}) {
   const key = parseIssueKey(keyOrUrl);
+  assertLockedIssueInput(keyOrUrl);
   return await request("PUT", `/rest/api/2/issue/${encodeURIComponent(key)}/comment/${commentId}`, { ...options, body: { body: String(body) } });
 }
 
@@ -542,6 +615,7 @@ export async function loadConfig() {
 /** 读取该单当前可用的工作流流转（只读），返回 [{ id, name, to }] */
 export async function listTransitions(keyOrUrl, options = {}) {
   const key = parseIssueKey(keyOrUrl);
+  assertLockedIssueInput(keyOrUrl);
   if (!key) throw new Error(`无法从输入中解析 Jira 问题 Key：${keyOrUrl}`);
   const data = await request("GET", `/rest/api/2/issue/${encodeURIComponent(key)}/transitions`, options);
   const list = (data && Array.isArray(data.transitions)) ? data.transitions : [];
@@ -586,6 +660,7 @@ export async function resolveFlowOwner(issue, options = {}) {
  */
 export async function transitionToStatus(keyOrUrl, targetStatus, options = {}) {
   const key = parseIssueKey(keyOrUrl);
+  assertLockedIssueInput(keyOrUrl);
   if (!key) throw new Error(`无法从输入中解析 Jira 问题 Key：${keyOrUrl}`);
   const target = String(targetStatus || "").trim();
   if (!target) throw new Error("缺少目标状态名");
@@ -613,6 +688,7 @@ export async function transitionToStatus(keyOrUrl, targetStatus, options = {}) {
  */
 export async function uploadAttachment(keyOrUrl, filePath, options = {}) {
   const key = parseIssueKey(keyOrUrl);
+  assertLockedIssueInput(keyOrUrl);
   if (!key) throw new Error(`无法从输入中解析 Jira 问题 Key：${keyOrUrl}`);
   const fs = await import("node:fs");
   const path = await import("node:path");
@@ -678,6 +754,7 @@ export async function resolveGateFields(options = {}) {
  */
 export async function setGateResult(keyOrUrl, payload = {}, options = {}) {
   const key = parseIssueKey(keyOrUrl);
+  assertLockedIssueInput(keyOrUrl);
   if (!key) throw new Error(`无法解析 Jira 问题 Key：${keyOrUrl}`);
   const { dryRun, ...rest } = options;
   const { fields, missing } = await resolveGateFields(rest);
@@ -711,6 +788,7 @@ export async function setGateResult(keyOrUrl, payload = {}, options = {}) {
 /** 读取当前门禁字段值，用于复审与写入后验证 */
 export async function getGateResult(keyOrUrl, options = {}) {
   const key = parseIssueKey(keyOrUrl);
+  assertLockedIssueInput(keyOrUrl);
   if (!key) throw new Error(`无法解析 Jira 问题 Key：${keyOrUrl}`);
   const { fields, missing } = await resolveGateFields(options);
   if (!fields.result) return { ok: false, skipped: true, reason: `未找到门禁字段：${missing.join("；")}` };
@@ -732,9 +810,12 @@ export async function selftest(options = {}) {
   const cred = options.token ? { token: options.token, source: "argument" } : await resolveToken(null);
   result.tokenSource = cred.source || null;
   result.checkedPaths = cred.checked || null;
-  result.baseUrl = options.baseUrl || cred.baseUrl || readEnv("JIRA_BASE_URL") || DEFAULT_BASE_URL;
+  result.baseUrl = envLocked()
+    ? (readEnv("JIRA_BASE_URL") || DEFAULT_BASE_URL)
+    : (options.baseUrl || cred.baseUrl || readEnv("JIRA_BASE_URL") || DEFAULT_BASE_URL);
   // 显式标注地址来源：避免在容器内静默连到生产 Jira 而无法察觉。
-  if (options.baseUrl) result.baseUrlSource = "调用参数";
+  if (envLocked()) result.baseUrlSource = "环境变量 JIRA_BASE_URL（服务端锁定）";
+  else if (options.baseUrl) result.baseUrlSource = "调用参数";
   else if (readEnv("JIRA_BASE_URL")) result.baseUrlSource = "环境变量 JIRA_BASE_URL";
   else if (cred.baseUrl) result.baseUrlSource = "令牌文件";
   else result.baseUrlSource = "内置默认值（生产 Jira）";

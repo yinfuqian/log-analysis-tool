@@ -12,7 +12,7 @@ description: 从 JIRA Server/DC 拉取需求，按 OpenSpec 好需求标准评�
 | 下文写法 | 容器内的实际写法 | 说明 |
 |---|---|---|
 | `${CLAUDE_SKILL_DIR}` | `/data/skills/review-jira-songlizhi` | Codex **不会**替换这个变量，必须写成绝对路径；先 `export SKILL_DIR=/data/skills/review-jira-songlizhi`，再把命令里的 `${CLAUDE_SKILL_DIR}` 换成 `${SKILL_DIR}` |
-| `$JIRA_PAT` | `$JIRA_TOKEN` | 容器的令牌注入在 `JIRA_TOKEN`；执行任何 `bin/*.mjs` 前先 `export JIRA_PAT="$JIRA_TOKEN"` 与 `export JIRA_BASE_URL="${JIRA_BASE_URL:-https://jira.in.wezhuiyi.com}"` |
+| `$JIRA_PAT` | `$JIRA_TOKEN` | 容器内后端注入 `JIRA_TOKEN` 与 `JIRA_BASE_URL` 并带上 `SKILLRUN_ENV_LOCKED=1`，脚本直接读这两项，无需桥接；桌面端未锁定时仍需 `export JIRA_PAT="$JIRA_TOKEN"` 与 `export JIRA_BASE_URL="${JIRA_BASE_URL:-https://jira.in.wezhuiyi.com}"` |
 | `<cwd>/reports/` | `/data/skill-workspace/reports/` | 工作目录是技能工作区，产物不写进技能目录（技能目录是只读挂载） |
 
 **只读边界不变**：本技能自身对 JIRA 只读，`bin/` 里没有任何写请求，不要为了顺手而加写接口。报告 md 上传成 JIRA 附件是**调用方 `jira-gate-1` 的职责**（用它自己的 `scripts/jira-cli.mjs attach`），不在本技能的范围内。

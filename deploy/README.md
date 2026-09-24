@@ -80,14 +80,20 @@ docker load -i fault-analysis-backend-2026.07.18-1.tar
 Codex 自身的状态库（`state_*.sqlite` 等）写在 `codex-home` 命名卷中，不会落到宿主机目录。需要附加 Codex 配置时用
 `CODEX_EXTRA_ARGS` 追加，例如 `CODEX_EXTRA_ARGS=-c model_context_window=128000`。
 
-`.env.production` 中除下面两项密钥外，其余技能配置均已内置默认值，可不再改动：
+`.env.production` 是技能运行参数的唯一权威来源，除下面三项外其余技能配置均已内置默认值，可不再改动：
 
 ```env
 # 【必填】技能使用的 Jira 个人访问令牌
 JIRA_TOKEN=请填写
+# 【必填】技能访问的 Jira 站点地址，必须与令牌所属站点一致：技能只允许访问这个地址，
+# 传入其它站点的需求单链接会被直接拒绝，避免把评论写到别的环境。
+JIRA_BASE_URL=https://jira.in.wezhuiyi.com
 # 【必填】Codex 使用的模型中转令牌
 CODEX_API_KEY=请填写
 ```
+
+`docker compose --env-file .env.production` 注入的是真实进程环境变量，优先级最高，不会被宿主目录里任何
+`.env` 文件覆盖；容器内也没有 `.env` 文件，因此容器里的取值完全由这份文件决定。
 
 需要按环境调整或加固时，再确认这几项（默认值已可直接使用）：
 
@@ -96,8 +102,6 @@ CODEX_API_KEY=请填写
 SKILL_API_TOKEN=local-dev-token
 # jira_url 允许的主机白名单
 SKILL_URL_ALLOWED_HOSTS=jira.in.wezhuiyi.com
-# 技能使用的 Jira 站点地址
-JIRA_BASE_URL=https://jira.in.wezhuiyi.com
 # Codex 使用的模型与中转地址
 CODEX_MODEL=codex/deepseek-flash
 CODEX_BASE_URL=https://newapi.in.wezhuiyi.com/v1

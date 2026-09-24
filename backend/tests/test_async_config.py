@@ -157,7 +157,9 @@ class AsyncConfigTests(unittest.TestCase):
                 self.assertEqual(os.environ["MYSQL_HOST"], "180.184.70.137")
                 self.assertEqual(os.environ["MYSQL_USERNAME"], "from-os")
                 self.assertEqual(os.environ["QUOTED_VALUE"], "hello world")
-                self.assertEqual(os.environ["EMPTY_VALUE"], "")
+                # 空值表示「未配置」：不再写入环境变量，避免根 .env 里的空键挤掉
+                # backend/.env 中已填好的同名有效值。
+                self.assertNotIn("EMPTY_VALUE", os.environ)
 
     def test_dotenv_loader_uses_last_value_for_duplicate_keys_in_same_file(self):
         module = load_config_module()
@@ -173,6 +175,40 @@ class AsyncConfigTests(unittest.TestCase):
                 module.load_dotenv_file(env_file)
 
                 self.assertEqual(os.environ["OPENAI_URL"], "https://newapi.in.wezhuiyi.com/v1")
+
+    def test_load_local_env_treats_root_env_as_authority(self):
+        """先读 backend/.env 兜底、再用根 .env 覆盖：根 .env 是唯一权威来源。"""
+        module = load_config_module()
+        calls = []
+        original = module.load_dotenv_file
+
+        def recorder(path, override=False, protected_keys=None):
+            """记录加载顺序与覆盖标记，不真正写环境变量。"""
+            calls.append((Path(path).parent.name, Path(path).name, override, bool(protected_keys)))
+
+        module.load_dotenv_file = recorder
+        try:
+            module.load_local_env()
+        finally:
+            module.load_dotenv_file = original
+
+        self.assertEqual([(item[0], item[1]) for item in calls], [("backend", ".env"), ("log-analysis-tool", ".env")])
+        self.assertFalse(calls[0][2])
+        self.assertTrue(calls[1][2])
+        # 两个文件都要保护真实进程环境变量，避免 .env 覆盖 docker compose 注入的值。
+        self.assertTrue(all(item[3] for item in calls))
+
+    def test_dotenv_loader_keeps_protected_process_values(self):
+        """protected_keys 中的变量来自真实进程环境，override=True 也不得改写。"""
+        module = load_config_module()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            env_file = Path(tmpdir) / ".env"
+            env_file.write_text("JIRA_BASE_URL=https://from-file.example.com\n", encoding="utf-8")
+
+            with patch.dict(os.environ, {"JIRA_BASE_URL": "https://from-process.example.com"}, clear=False):
+                module.load_dotenv_file(env_file, override=True, protected_keys={"JIRA_BASE_URL"})
+
+                self.assertEqual(os.environ["JIRA_BASE_URL"], "https://from-process.example.com")
 
 
 if __name__ == "__main__":

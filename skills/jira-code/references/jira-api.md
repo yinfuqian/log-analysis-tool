@@ -4,7 +4,7 @@
 
 ## 1. 认证与地址
 
-- 认证头：`Authorization: Bearer <JIRA_TOKEN>`（Jira Server / Data Center 的 PAT）。
+- 认证头：`Authorization: Bearer <JIRA_TOKEN>`（Jira Server / Data Center 的 PAT）。容器内后端会注入并锁定 `JIRA_TOKEN` 与 `JIRA_BASE_URL`（`SKILLRUN_ENV_LOCKED=1`）：只用环境变量，不读令牌文件，也不接受 `--token` / `--base-url` 覆盖。
 - 地址：`JIRA_BASE_URL`，未配置时回落到脚本内置默认值。自检结果里的 `baseUrlSource` 会说明地址来自哪里；**如果显示「内置默认值」，说明没配对环境变量，动手前先确认站点**（生产与测试站点的单号可能同名）。
 - 每次请求都带 `X-Atlassian-Token: no-check`，附件类接口缺这个头会被 XSRF 拦截。
 
